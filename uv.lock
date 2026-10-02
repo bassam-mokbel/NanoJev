@@ -462,7 +462,7 @@ requires-dist = [
     { name = "huggingface-hub", specifier = ">=1.0" },
     { name = "pillow", marker = "extra == 'replay'", specifier = ">=12" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
-    { name = "qupa-datatypes", git = "ssh://git@bitbucket.org/interrogaregmbh/qupa-datatypes.git?tag=v0.19.0" },
+    { name = "qupa-datatypes", editable = "../qupa-datatypes" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
     { name = "safetensors", specifier = ">=0.8" },
     { name = "torch", specifier = ">=2.5" },
@@ -1180,13 +1180,32 @@ wheels = [
 [[package]]
 name = "qupa-datatypes"
 version = "0.19.0"
-source = { git = "ssh://git@bitbucket.org/interrogaregmbh/qupa-datatypes.git?tag=v0.19.0#064ab78e1f2f1df86ea3f574b4336a484a227b88" }
+source = { editable = "../qupa-datatypes" }
 dependencies = [
     { name = "click" },
     { name = "defusedxml" },
     { name = "loguru" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "click", specifier = ">=8.4.2" },
+    { name = "defusedxml", specifier = ">=0.7.1" },
+    { name = "loguru", specifier = ">=0.7.3" },
+    { name = "psycopg", extras = ["binary"], marker = "extra == 'postgres'", specifier = ">=3.2" },
+    { name = "pydantic", specifier = ">=2.13.4" },
+    { name = "pydantic-settings", specifier = ">=2.14.2" },
+    { name = "pytest", marker = "extra == 'test'", specifier = ">=9.1.1" },
+]
+provides-extras = ["postgres", "test"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "mypy", specifier = ">=1.11.2" },
+    { name = "pre-commit", specifier = ">=4.6.1" },
+    { name = "pytest", specifier = ">=9.1.1" },
 ]
 
 [[package]]
