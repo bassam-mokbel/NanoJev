@@ -22,3 +22,10 @@ publish/
 *.pt
 *.pth
 .DS_Store
+
+# Python packaging and tooling
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/

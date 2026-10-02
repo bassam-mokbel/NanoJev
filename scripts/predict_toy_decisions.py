@@ -173,6 +173,35 @@ def load_decision_model_class():
     return module.DecisionModel
 
 
+def check_rotary(body, body_config_dir):
+    """Fail if the built rotary frequencies differ from the ones the config file declares.
+
+    The release config stores theta under the transformers 5 `rope_parameters` field. transformers
+    4.x ignores that field and silently builds theta=10000 instead of 1e6, corrupting every position.
+    """
+    import torch
+    raw = read_json(Path(body_config_dir) / "config.json")
+    rope = raw.get("rope_parameters") or raw.get("rope_scaling") or {}
+    theta = rope.get("rope_theta", raw.get("rope_theta"))
+    inv_freq = getattr(getattr(body, "rotary_emb", None), "inv_freq", None)
+    if rope.get("rope_type", rope.get("type", "default")) != "default" or theta is None or inv_freq is None:
+        return
+    dim = raw.get("head_dim") or raw["hidden_size"] // raw["num_attention_heads"]
+    expected = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float32, device="cpu") / dim))
+    if inv_freq.shape != expected.shape or not torch.allclose(inv_freq.detach().float().cpu(), expected, rtol=1e-4):
+        raise RuntimeError(f"Rotary embedding does not match rope_theta={theta} in {body_config_dir}; the installed "
+                           "transformers misreads this config. Install transformers>=5.17 (the release version).")
+
+
+def build_backbone(body_config, body_config_dir):
+    """FP32 backbone structure from a local config, verified against the config file's RoPE base."""
+    from transformers import AutoModel
+    # from_config 只构造结构；全部参数由best.safetensors加载，不用from_pretrained下载底座。
+    body = AutoModel.from_config(body_config, attn_implementation="sdpa", trust_remote_code=False).float()
+    check_rotary(body, body_config_dir)
+    return body
+
+
 class DecisionPredictor:
     """本地持久推理对象：构造时加载一次权重，每次predict批量计算完整问题。"""
 
@@ -191,7 +220,7 @@ class DecisionPredictor:
         os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
         import torch
         from safetensors.torch import load_file
-        from transformers import AutoConfig, AutoModel, AutoTokenizer
+        from transformers import AutoConfig, AutoTokenizer
     
         if disable_native_triton:
             from torch._native import triton_utils
@@ -218,8 +247,7 @@ class DecisionPredictor:
         if isinstance(context_limit, int) and limit > context_limit:
             raise ValueError("max-length 超过backbone配置声明的上下文长度")
     
-        # from_config 只构造结构；全部参数由best.safetensors加载，不用from_pretrained下载底座。
-        body = AutoModel.from_config(body_config, attn_implementation="sdpa", trust_remote_code=False).float()
+        body = build_backbone(body_config, paths["body_config"])
         DecisionModel = load_decision_model_class()
         model = DecisionModel(body, run_config["set_head"])
         weights = load_file(str(paths["weights"]), device="cpu")

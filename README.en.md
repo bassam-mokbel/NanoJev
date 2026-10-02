@@ -102,6 +102,18 @@ cd NanoJev
 python -m pip install -r requirements-toy.txt huggingface_hub
 ```
 
+`transformers>=5.17` is required (`requirements-toy.txt` pins 5.17.0). The checkpoint's `backbone_config/config.json` stores the RoPE base only in the transformers 5 `rope_parameters` field. transformers 4.x ignores that field and builds the wrong position encodings, so the loaders stop with an error rather than run on them.
+
+To install NanoJev as a package instead (Python ≥ 3.10; install a CUDA build of torch first):
+
+```bash
+python -m pip install -e ".[dev]"
+nanojev --help    # predict, serve, survey prepare / train / init-bundle
+pytest            # full test suite
+```
+
+This installs the inference and survey-training modules and adds the `nanojev` command. The research scripts in `scripts/` are unchanged and still run directly.
+
 Download the current checkpoint and data:
 
 ```python
@@ -141,7 +153,7 @@ Open **http://127.0.0.1:8080/dev/?autoplay=1** for ViZDoom Basic or **http://127
 
 ## Development notes
 
-[Release contents and reproduction](docs/UNIFIED_DEVELOPMENT_RELEASE.md) · [Input contract](docs/TYPESAFE_CONTRACT.md) · [Unified environments](docs/UNIFIED_GAMES.md) · [Atomic planning](docs/ATOMIC_PLANNING.md) · [Predict Position replay](docs/PREDICT_POSITION_DEMO.md) · [Shooting replay](docs/SHOOTING_DEMO.md)
+[Release contents and reproduction](docs/UNIFIED_DEVELOPMENT_RELEASE.md) · [Input contract](docs/TYPESAFE_CONTRACT.md) · [Unified environments](docs/UNIFIED_GAMES.md) · [Atomic planning](docs/ATOMIC_PLANNING.md) · [Predict Position replay](docs/PREDICT_POSITION_DEMO.md) · [Shooting replay](docs/SHOOTING_DEMO.md) · [Survey post-training](docs/SURVEY_POST_TRAINING.md)
 
 ## Roadmap
 

@@ -102,6 +102,18 @@ cd NanoJev
 python -m pip install -r requirements-toy.txt huggingface_hub
 ```
 
+需要 `transformers>=5.17`（`requirements-toy.txt` 固定为 5.17.0）。checkpoint 的 `backbone_config/config.json` 只在 transformers 5 的 `rope_parameters` 字段中保存 RoPE base；transformers 4.x 会忽略该字段并构造错误的位置编码，因此加载器会直接报错，而不是在错误编码上运行。
+
+也可以把 NanoJev 作为包安装（Python ≥ 3.10；请先安装与本机 CUDA 匹配的 torch）：
+
+```bash
+python -m pip install -e ".[dev]"
+nanojev --help    # predict、serve、survey prepare / train / init-bundle
+pytest            # 完整测试
+```
+
+该包安装推理与问卷训练模块，并提供 `nanojev` 命令；`scripts/` 中的研究脚本保持不变，仍可直接运行。
+
 下载当前 checkpoint 与数据：
 
 ```python
@@ -141,7 +153,7 @@ python3 -m http.server 8080 --bind 127.0.0.1 --directory web
 
 ## 开发文档
 
-[发布内容与复现方法](docs/UNIFIED_DEVELOPMENT_RELEASE.md) · [输入契约](docs/TYPESAFE_CONTRACT.md) · [统一环境](docs/UNIFIED_GAMES.md) · [原子判断与规划](docs/ATOMIC_PLANNING.md) · [Predict Position 回放](docs/PREDICT_POSITION_DEMO.md) · [射击回放](docs/SHOOTING_DEMO.md)
+[发布内容与复现方法](docs/UNIFIED_DEVELOPMENT_RELEASE.md) · [输入契约](docs/TYPESAFE_CONTRACT.md) · [统一环境](docs/UNIFIED_GAMES.md) · [原子判断与规划](docs/ATOMIC_PLANNING.md) · [Predict Position 回放](docs/PREDICT_POSITION_DEMO.md) · [射击回放](docs/SHOOTING_DEMO.md) · [问卷数据后训练](docs/SURVEY_POST_TRAINING.md)
 
 ## 路线图
 
