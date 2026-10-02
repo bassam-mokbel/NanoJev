@@ -29,3 +29,12 @@ dist/
 *.egg-info/
 .pytest_cache/
 .ruff_cache/
+
+# joe backup files
+*~
+
+# project-specific resource folders
+data/
+
+# MacOS
+.DS_Store
