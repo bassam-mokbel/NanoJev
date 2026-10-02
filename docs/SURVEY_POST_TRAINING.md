@@ -1,31 +1,39 @@
 # Post-training NanoJev on market research surveys
 
 This guide fully fine-tunes the released NanoJev checkpoint on your own survey data, using the
-same recipe as the released model. Two scripts do the work:
+same recipe as the released model. The inputs are [qupa-datatypes](https://bitbucket.org/interrogaregmbh/qupa-datatypes)
+models: a `Survey` definition and its `SurveyResponse` records, each a list of `SurveyAnswer`s.
 
-- [`prepare_survey_data.py`](../scripts/prepare_survey_data.py) converts a respondent CSV and a
-  question spec into training rows.
+- [`prepare_survey_data.py`](../scripts/prepare_survey_data.py) turns surveys and responses into
+  NanoJev training rows, as described by a **training spec** (JSON).
 - [`train_survey_decisions.py`](../scripts/train_survey_decisions.py) trains every parameter and
-  writes an ordinary NanoJev bundle.
+  writes an ordinary NanoJev bundle. It takes the spec directly (`--spec`) or prepared rows (`--data`).
 
-A synthetic example lives in [`configs/survey_example/`](../configs/survey_example/).
+A synthetic example lives in [`configs/survey_example/`](../configs/survey_example/): a fictional
+coffee survey with 240 generated respondents, built with qupa models by `generate_example.py`.
 
 ## What the model learns
 
-Every survey question becomes a NanoJev primitive, asked about one respondent (or segment):
+Each training row asks how one respondent answers one survey question, given that respondent's
+other answers. Targets come from the full question definition, so options the respondent did not
+choose are training signal too.
 
-| Survey item | Primitive | What the model returns |
+| qupa question | NanoJev primitive | Target |
 |---|---|---|
-| Single-select (brand used most) | `choice` | A distribution over the offered options |
-| Likert, satisfaction, NPS | `score` | A distribution over 2–10 ordered levels, plus the expected level |
-| Yes/no, awareness, one option of a multi-select | `boolean` | P(true) |
+| `SingleQuestion` or grid row, ordered `Scale` with 2–10 substantive points | `score` | Selected point in `Scale.analytical_points()` order (low to high) |
+| …the same, but the scale also has non-substantive points ("don't know") | extra `boolean` | Whether the respondent chose one of them; the score is trained only on substantive answers |
+| Any other `SingleQuestion` or grid row: `ChoiceSet`, nominal or unspecified scales, more than 10 points | `choice` | Selected option, over every value |
+| `MultiQuestion`, `MultiGridQuestion` row | one `boolean` per option | Whether that option was selected |
+| `RankingQuestion` | sequential `choice`s | Rank 1 among all items, rank 2 among the remaining ones, and so on |
+| `MaxDiffQuestion` | two `choice`s per task | Best among the presented items, then worst among the rest |
+| Text, numeric, text-list and numeric-list questions | none | Used as context only |
 
-The **state** is the text the model conditions on: demographics, behaviours, earlier answers, or
-an open-ended verbatim. Training minimizes cross entropy between the model's distribution and the
-observed answer (respondent mode), or the segment's weighted answer shares (aggregate mode).
+The **state** is the respondent's other answers, verbalized through qupa's resolution layer: one
+line per question with its participant-facing wording, rows indented beneath grids, and loop items
+in brackets. Loop-scoped answers become separate targets whose question names the loop item.
 
 Every run also scores a **train answer-share baseline**: the weighted marginal distribution of
-each question in the training split. If the model does not beat this baseline on test, it has
+each target in the training split. If the model does not beat this baseline on test, it has
 learned nothing beyond the crosstab.
 
 ## 1. Hardware
@@ -45,40 +53,32 @@ The recipe keeps FP32 weights and AdamW state and runs the forward pass in BF16:
 - **Pre-Ampere GPUs** (V100, T4) lack BF16. They need `--precision fp32`, which is slower and needs more activation memory.
 - **Other resources:** about 15 GB of disk per run, and system RAM roughly twice the size of your tokenized dataset.
 
-The script measures real peak memory before training starts (step 7), so you don't have to trust these estimates.
+The script measures real peak memory before training starts (step 6), so you don't have to trust these estimates.
 
 ## 2. Environment
 
+The project uses [uv](https://docs.astral.sh/uv/). `qupa-datatypes` is pinned in `pyproject.toml` to
+a tag in a private Bitbucket repository, so the machine needs SSH access to it (for example a
+deploy key).
+
 ```bash
 git clone <your fork> NanoJev && cd NanoJev
-python3 -m venv .venv && source .venv/bin/activate
+uv sync --extra dev
+uv run pytest scripts/test_survey_training.py
 ```
 
-Install a CUDA build of PyTorch for your driver ([pytorch.org selector](https://pytorch.org/get-started/locally/)), then:
+On Linux, the PyPI torch wheel includes CUDA. If your driver needs a different CUDA build, point
+uv at the matching PyTorch index (see the [uv PyTorch guide](https://docs.astral.sh/uv/guides/integration/pytorch/)).
 
-```bash
-pip install "transformers>=5.17" "safetensors>=0.8" tokenizers huggingface_hub
-```
-
-Alternatively, `pip install -e ".[dev]"` installs the same dependencies from `pyproject.toml` and adds the `nanojev` command.
-Each `python scripts/prepare_survey_data.py …` below can then be run as `nanojev survey prepare …`, and each
-`python scripts/train_survey_decisions.py train|init-bundle …` as `nanojev survey train|init-bundle …`.
+The commands below use `uv run nanojev …`. Each one is equivalent to `python scripts/<module>.py`:
+`survey prepare` is `prepare_survey_data.py`, and `survey train|init-bundle` is
+`train_survey_decisions.py train|init-bundle`.
 
 **transformers 5 is required for the released checkpoint.** Its `backbone_config/config.json` stores
 the RoPE base (1,000,000) under the transformers 5 `rope_parameters` field. transformers 4.x
 ignores that field and silently builds a base of 10,000, which scrambles every position encoding.
-The trainer recomputes the rotary frequencies the config file declares, compares them with the
-ones the model actually built, and stops with an error on a mismatch.
-
-The release was trained with Python 3.14, torch 2.14 and transformers 5.17
-([requirements-toy.txt](../requirements-toy.txt)). These scripts were also tested on CPU with
-Python 3.10, torch 2.7 and transformers 5.18. `--disable-native-triton` is not needed here.
-
-Run the offline tests:
-
-```bash
-python -m unittest discover -s scripts -p test_survey_training.py -v
-```
+The loaders recompute the rotary frequencies the config file declares, compare them with the
+ones the model actually built, and stop with an error on a mismatch.
 
 ## 3. Download the starting checkpoint
 
@@ -89,98 +89,127 @@ snapshot_download(repo_id="C-Tianyu/NanoJev", revision="unified-games-v1",
                   allow_patterns=["best.safetensors", "config.json", "tokenizer/*", "backbone_config/*"])
 ```
 
-## 4. Map your questionnaire onto primitives
+## 4. Write a training spec
 
-Five rules come from how NanoJev encodes inputs. The converter enforces the first three.
-
-1. **Choice option keys are model input.** Each candidate is encoded as `key: description`. A key like `"3"` carries no meaning, so use `"corner_roast"`.
-2. **Score levels are judged one at a time.** Each level description is encoded alone, without its number or its neighbours. Write self-contained levels like "Somewhat satisfied with their usual brand", not "4".
-3. **At most 10 Score levels.** Bucket an 11-point NPS scale into, for example, detractor, passive and promoter levels, each with its own description.
-4. **Multi-select questions become one Boolean per option.** Questions are independent: none sees another's answer.
-5. **Never put the answer, or anything derived from it, in the state.** The converter rejects a question column used as a state field. Derived variables, such as a loyalty segment computed from the brand question, are your responsibility.
-
-Questions are answered independently. If you want "given their earlier answers" prediction, put
-those earlier answers in the state.
-
-**Open-ended coding** fits the same format:
-- **State:** the verbatim (plus profile fields if useful).
-- **Mutually exclusive codes:** one Choice question over the codeframe.
-- **Multi-label codes:** one Boolean per code.
-
-## 5. Write a spec and convert
-
-Export your survey to CSV with one row per respondent and raw codes. From SPSS, `pandas.read_spss(path, convert_categoricals=False)` keeps the codes.
-
-Then copy [`configs/survey_example/spec.json`](../configs/survey_example/spec.json) and edit it:
-
-| Spec key | Meaning |
-|---|---|
-| `id_column` | Respondent id |
-| `weight_column` | Optional survey weight. Use it to learn population rather than sample distributions. |
-| `group_column` | Optional. Keeps households or panels together in one split. Defaults to the respondent id. |
-| `missing_codes` | Codes treated as unanswered, for example refused or skipped. Those questions are left out for that respondent. |
-| `state.fields` | Profile columns, each with a label and optional `values` mapping codes to text |
-| `questions` | Each entry has `id`, `column`, `type` and `instructions`, plus `options` (choice), `levels` (score) or `true_codes`/`false_codes` (boolean) |
-| `splits` | Fractions for `train`, `dev`, `calibration`, `test`, and optionally `ood` |
-
-```bash
-python scripts/prepare_survey_data.py --csv my_survey.csv --spec my_spec.json --output data/survey/rows.jsonl
-```
-
-Splits are assigned by a hash of the respondent (or group) id, so they are stable across reruns.
-
-For a real generalization test, hold out a **whole wave, market or brand** yourself: set those rows' `split` to `ood` in the JSONL. Random respondent splits only test new people from the same survey.
-
-`--aggregate` merges respondents whose rendered state is identical and writes the weighted answer shares as soft targets. This only helps when the state has a few coarse fields. With many fields, nearly every segment holds one respondent.
-
-The training JSONL can also be written by your own code. Each row looks like this:
+A spec lists the data sources and decides which answers are targets and which are context.
+Relative paths resolve from the spec file. Start from [`configs/survey_example/training_spec.json`](../configs/survey_example/training_spec.json):
 
 ```json
-{"id": "R0001", "split": "train", "weight": 1.3, "group": "household-17",
- "state": "Market research survey respondent ...\n- Age: 25-34\n- Region: South",
- "questions": {"brand_pref": {"type": "choice", "instructions": "Which coffee brand ...?",
-                              "criteria": {"brightbean": "BrightBean, a premium ...", "store_brand": "The supermarket's own ..."}}},
- "gold": {"brand_pref": "store_brand"}}
+{
+  "sources": [
+    {"name": "coffee_w1", "survey": "w1/survey.json", "responses": "w1/responses.jsonl"},
+    {"name": "coffee_w2", "survey": "w2/survey.json", "responses_csv": "w2/rawdata.csv",
+     "response_map": "w2/response-map.json", "split": "ood"}
+  ],
+  "context": "preceding",
+  "weight_key": "weight",
+  "context_exclude_kinds": ["text"]
+}
+```
+
+**Sources.** Each source is one survey revision:
+- `responses`: `SurveyResponse` records as JSONL, a JSON list, or one object.
+- `responses_csv` with `response_map`: a raw export imported through qupa's `import_responses_csv`. Unmapped columns are counted in the conversion report.
+- `split` (optional): puts the whole source into one split. Use `"ood"` to hold out a wave, market or survey, which is a stronger generalization test than new respondents from the same survey.
+
+Every response is validated with `SurveyResponse.validate_against(survey)` before use.
+
+**Fields:**
+
+| Field | Default | Meaning |
+|---|---|---|
+| `targets` | `"all"` | `"all"` visible closed questions, or a list of question ids |
+| `exclude` | `[]` | Question ids never used as targets |
+| `context` | `"preceding"` | `"preceding"`: only earlier survey elements. `"all_other"`: every other answer. `"listed"`: exactly `context_questions` (one row per respondent, and those questions are never targets) |
+| `context_exclude`, `context_exclude_kinds` | `[]` | Question ids or kinds (for example `"text"`) never shown in a state |
+| `max_state_chars` | 4000 | Context budget per state. The nearest questions are kept first |
+| `max_question_chars` | 40000 | Every candidate repeats the state, so the state budget is also capped at this ÷ the row's largest candidate count. Keep it near 3× `--max-microbatch-tokens` |
+| `max_context_answers`, `max_line_chars` | 40, 300 | Further caps on context size |
+| `include_hidden` | `false` | Use `VariableType.HIDDEN` questions as targets and context. They are often recodes of other answers, so they leak |
+| `include_synthetic` | `false` | Use answers with `is_synthetic: true`. Training a twin on twins' answers is circular |
+| `non_substantive` | `"boolean"` | `"boolean"` adds the don't-know target described above; `"skip"` drops those answers |
+| `weight_key`, `group_key` | none | `SurveyResponse.custom_meta` keys for the survey weight and a split group (for example a household). With CSV imports, map them via the response map's `metadata_columns` |
+| `splits`, `split_seed` | 70/10/10/10 | Fractions over `train`, `dev`, `calibration`, `test` and optionally `ood`. Assigned by a hash of the group, so stable across reruns |
+| `scale_verbalizations`, `verbalization_language` | none | A JSON/JSONL list of qupa `ScaleVerbalization` records and the language (`DE` or `EN`) to use |
+| `skip_invalid_responses` | `false` | Skip responses that fail validation, listing them in the report, instead of stopping |
+
+### Why "preceding" is the default
+
+Routing only flows forward. A follow-up asked only of brand users reveals that a respondent uses
+the brand, so with `all_other` a later filtered question can leak the target's answer. `preceding`
+context cannot contain a question routed on the target. The same caution applies to `listed`
+questions that come after a target in the survey.
+
+### Score levels must read on their own
+
+NanoJev judges every Score level separately, without its position or its neighbours. Many
+questionnaires label only the endpoints (`1 = Not at all`, `2`, … `7 = Completely`), and a bare "4"
+means nothing alone. The converter therefore uses, in order:
+
+1. a stored `ScaleVerbalization` label for the point, matched by `scale_content_fingerprint`, when the spec provides one;
+2. otherwise, on an ordered scale with bare-number points, the point plus the labelled endpoints: `4 [1 = Not at all … 7 = Completely]`.
+
+Choice candidates are encoded as `option_id: text`, so qupa ids like `code_3` appear in model inputs.
+They are harmless next to the text, but descriptive ids are better.
+
+## 5. Convert and inspect
+
+```bash
+uv run nanojev survey prepare --spec my_spec.json --output data/survey/rows.jsonl
+```
+
+This writes `rows.jsonl` and `rows.report.json`. The report records:
+- **source hashes**: the SHA256 of every input file, plus qupa's survey fingerprint;
+- **counts**: rows per split and targets per kind and role;
+- **what was left out and why**: for example `not_a_target:text:visible`, `synthetic_answers`, or `context_answers_over_budget`.
+
+Read a few rows before training. Each row carries `meta.targets`, which maps every NanoJev question
+back to its survey question, row, option and loop scope. It also carries `meta.context_questions`,
+the questions shown in its state.
+
+The rows format is generic, so other tools can write it too:
+
+```json
+{"id": "coffee_w1:R0001:q_brand", "split": "train", "weight": 1.2, "group": "coffee_w1:R0001",
+ "state": "Survey: …\nAnswers this respondent gave:\n- Where do you live?: South",
+ "questions": {"q_brand": {"type": "choice", "instructions": "Survey question: …",
+                           "criteria": {"brightbean": "BrightBean, …", "store_brand": "The supermarket's own …"}}},
+ "gold": {"q_brand": "store_brand"}, "meta": {"targets": {"q_brand": {"question_id": "q_brand"}}}}
 ```
 
 `gold` holds a choice key, a score level index or a Boolean. `gold_probs` holds a full distribution
-and takes precedence over `gold`. Every question in a row needs one or the other.
+and takes precedence over `gold`.
 
-## 6. Optional: dry run on the synthetic example
-
-The example is a fictional coffee survey of 240 respondents. It runs in a few minutes:
+## 6. Probe memory
 
 ```bash
-python scripts/prepare_survey_data.py --csv configs/survey_example/responses.csv \
-  --spec configs/survey_example/spec.json --output data/survey_example/rows.jsonl
-python scripts/train_survey_decisions.py train --checkpoint-dir checkpoints/NanoJev-unified \
-  --data data/survey_example/rows.jsonl --output-dir runs/survey_example --steps 100 --eval-every 20
-```
-
-## 7. Probe memory
-
-```bash
-python scripts/train_survey_decisions.py train --checkpoint-dir checkpoints/NanoJev-unified \
-  --data data/survey/rows.jsonl --output-dir runs/probe --probe-only
+uv run nanojev survey train --checkpoint-dir checkpoints/NanoJev-unified \
+  --spec my_spec.json --output-dir runs/probe --probe-only
 ```
 
 This runs the largest training microbatch forward and backward, allocates the optimizer state,
 prints peak CUDA memory, and writes nothing. If it runs out of memory, halve
-`--max-microbatch-tokens` (the budget is candidate paths × longest path).
+`--max-microbatch-tokens` and lower the spec's `max_question_chars` to match.
 
 A single question that exceeds the budget is an error. A question's candidates are never split
 across microbatches, because the softmax must cover the complete question.
 
-## 8. Train
+To try the pipeline first, run the same commands on `configs/survey_example/training_spec.json`
+with `--steps 100 --eval-every 20`.
+
+## 7. Train
 
 ```bash
-python scripts/train_survey_decisions.py train \
+uv run nanojev survey train \
   --checkpoint-dir checkpoints/NanoJev-unified \
-  --data data/survey/rows.jsonl \
+  --spec my_spec.json \
   --output-dir runs/survey_v1 \
   --steps 1500 --batch-questions 24 --eval-every 50 --patience 6 \
   --backbone-lr 1e-5 --head-lr 1e-4 --rps-weight 0.5 --save-resume-state
 ```
+
+With `--spec`, the converted rows and their report are saved in the run directory (`rows.jsonl`,
+`conversion_report.json`), and the rows' SHA256 is recorded in the bundle's `config.json`.
 
 | Flag | What it controls |
 |---|---|
@@ -188,13 +217,13 @@ python scripts/train_survey_decisions.py train \
 | `--backbone-lr` / `--head-lr` | Learning rates. These defaults are the released `hard_lr1e5` recipe. On a few thousand questions, try 5e-6 if dev CE rises early. |
 | `--rps-weight` | Adds a ranked probability score for Score questions, so predicting "4" when the answer is "5" costs less than predicting "1". 0 gives plain cross entropy, like the release. |
 | `--schedule cosine --warmup-steps 50` | Optional decay schedule. The release used a constant rate. |
-| `--save-resume-state` / `--resume` | Writes about 7 GB of model and optimizer state at each eval. After an interruption, rerun the same command with `--resume`; it continues from that eval with the same data order. (Bit-exact on CPU; BF16 GPU kernels are not bitwise deterministic.) |
-| `--max-length` | Per-path token limit. Inputs are never truncated: an over-long path is an error. Raise it if your states are long. |
+| `--save-resume-state` / `--resume` | Writes about 7 GB of model and optimizer state at each eval. After an interruption, rerun the same command with `--resume`. It reconverts the spec and refuses to continue if the rows changed. It then continues from that eval with the same data order. (Bit-exact on CPU; BF16 GPU kernels are not bitwise deterministic.) |
+| `--max-length` | Per-path token limit. Inputs are never truncated: an over-long path is an error. |
 
 **Monitoring:**
 - **Training output:** each eval prints one JSON line with dev metrics.
 - **GPU:** watch it with `nvidia-smi`.
-- **Speed:** `seconds_per_step` gives the real throughput. Cost grows with candidates × state length, because each candidate re-encodes the full state, so keep states compact.
+- **Speed:** `seconds_per_step` gives the real throughput. Cost grows with candidates × state length, because each candidate re-encodes the full state.
 
 **What gets saved:**
 - `best.safetensors` is overwritten only when weighted dev cross entropy improves.
@@ -207,52 +236,58 @@ helps or hurts on surveys. The same arm also gives a lineage free of Jev-derived
 (the released checkpoint's Maze and Snake targets came from the Jev API).
 
 ```bash
-python scripts/train_survey_decisions.py init-bundle --model Qwen/Qwen3-0.6B --output-dir checkpoints/qwen3-fresh-heads
-python scripts/train_survey_decisions.py train --checkpoint-dir checkpoints/qwen3-fresh-heads \
-  --data data/survey/rows.jsonl --output-dir runs/survey_v1_qwen --head-steps 100 \
+uv run nanojev survey init-bundle --model Qwen/Qwen3-0.6B --output-dir checkpoints/qwen3-fresh-heads
+uv run nanojev survey train --checkpoint-dir checkpoints/qwen3-fresh-heads \
+  --spec my_spec.json --output-dir runs/survey_v1_qwen --head-steps 100 \
   --steps 1600 --batch-questions 24 --eval-every 50 --patience 6 --rps-weight 0.5
 ```
 
 `--head-steps` trains only the freshly initialized heads first, so random heads don't push large
 gradients into the backbone. Choose between arms on **dev**, then look at test once.
 
-## 9. Read the report
+## 8. Read the report
 
 `runs/<name>/report.json` contains:
 
-- **`final.<split>.model`:** weighted cross entropy (`ce`), Brier score, top-label accuracy and ECE, and `score_abs_error` (expected level against the true level). Each is also broken down by question type.
+- **`final.<split>.model`:** weighted cross entropy (`ce`), Brier score, top-label accuracy and ECE, and `score_abs_error` (expected level against the true level). Each is also broken down by NanoJev question type.
 - **`final.<split>.model_calibrated`:** the same metrics after the temperature fitted on the `calibration` split. The value is in `temperature`.
 - **`final.<split>.train_prior`:** the answer-share baseline. **The model must beat it to be useful.**
-- **`test_by_question`:** per-question metrics. Expect some questions to be predictable from the profile and others not.
+- **`test_by_question`** (and `ood_by_question`): metrics per **survey question** id, aggregated over its rows, options, ranks and loop items.
 
 Accuracy is a weak metric for survey prediction. Many answers are genuinely uncertain given a
 profile, so cross entropy and Brier against the observed answers are the main measures.
 
-For segment-level share estimates, aggregate the predicted distributions over the respondents in
-a held-out segment and compare them with the observed shares.
-
 The temperature is fitted on calibration data from the same distribution. Check that it improves
 `test` before using it, and don't assume it transfers to a new market or wave.
 
-## 10. Use the model
+## 9. Use the model
 
-The output directory is a standard bundle (`config.json`, `best.safetensors`, `tokenizer/`, `backbone_config/`):
+The output directory is a standard bundle (`config.json`, `best.safetensors`, `tokenizer/`, `backbone_config/`).
+Requests must use exactly the wording the converter produces. To score respondents whose answers
+you already have, for example a new wave held out for evaluation, build rows from a spec and send
+each row's `state` and `questions`:
 
 ```python
-import sys; sys.path.insert(0, "scripts")
-from predict_toy_decisions import DecisionPredictor
+from nanojev import DecisionPredictor
+from nanojev.survey import build_rows, load_spec
 
+rows, _ = build_rows(*load_spec("holdout_spec.json"))
 engine = DecisionPredictor("runs/survey_v1", precision="bf16")
-result = engine.predict({"states": [{"id": "p1", "state": "Market research survey respondent ...\n- Age: 18-24",
-                                     "questions": {"brand_pref": {"type": "choice", "instructions": "...",
-                                                                  "criteria": {"brightbean": "...", "store_brand": "..."}}}}]},
+result = engine.predict({"states": [{"id": r["id"], "state": r["state"], "questions": r["questions"]} for r in rows[:32]]},
                         temperature=1.0)  # or config.json post_training.recommended_temperature
 ```
 
-Use exactly the instruction and option text from training; the model has only learned those wordings.
+Each answer's probabilities map back to qupa identifiers through the row's `meta.targets`:
+- choice keys are option, point or item ids;
+- score levels follow `analytical_points()`.
 
-`python scripts/serve_decisions.py --checkpoint-dir runs/survey_v1` serves the same model over HTTP
-at `POST /api/evaluate`. It always uses temperature 1 and caps each request at 32 states, 96
+`build_rows` creates targets only for answered questions, because each needs its observed answer.
+Predicting questions a respondent has **not** answered needs a request builder that renders the
+same state and questions without labels. Turning the predictions into synthetic `SurveyAnswer`s
+(`is_synthetic=True`) is a further step. Neither is part of this pipeline yet.
+
+`uv run nanojev serve --checkpoint-dir runs/survey_v1` serves the same model over HTTP at
+`POST /api/evaluate`. It always uses temperature 1 and caps each request at 32 states, 96
 questions and 256 candidate paths, so use `DecisionPredictor` directly for batch scoring.
 
 ### Inference on a Jetson Orin Nano Super (8 GB)
@@ -266,7 +301,7 @@ end to end with this model.
    ```bash
    pip install torch --index-url https://download.pytorch.org/whl/cu130
    ```
-   Then install transformers ≥ 5.17 as above. Avoid NVIDIA's older `2.5.0a0` Jetson wheels: transformers 5 requires torch ≥ 2.5 and treats `2.5.0a0` as older, so it disables PyTorch. A "compute capability 8.7" warning at startup is harmless.
+   Then install transformers ≥ 5.17. Avoid NVIDIA's older `2.5.0a0` Jetson wheels: transformers 5 requires torch ≥ 2.5 and treats `2.5.0a0` as older, so it disables PyTorch. A "compute capability 8.7" warning at startup is harmless.
 3. **Use maximum performance and free memory:**
    ```bash
    sudo nvpmodel -m 2
@@ -280,16 +315,17 @@ end to end with this model.
 
 | Symptom | Fix |
 |---|---|
-| `requires N padded tokens, over budget` | One question has too many or too long candidates. Raise `--max-microbatch-tokens`, or shorten the state and descriptions. |
-| `exceeds max_length` | Raise `--max-length`. Paths are never truncated. |
-| `group ... appears in both` | A respondent or household is in two splits. Fix the split assignment. |
+| `source …, respondent …: …` during conversion | A response does not validate against its survey. Fix the data, or set `skip_invalid_responses` and read `invalid_responses` in the report. |
+| `requires N padded tokens, over budget` | One question has too many or too long candidates. Raise `--max-microbatch-tokens`, or lower `max_question_chars` in the spec. |
+| `exceeds max_length` | Raise `--max-length`, or lower `max_state_chars`. Paths are never truncated. |
+| `group ... appears in both` | A respondent or group is in two splits. With `group_key`, check that a group belongs to one source. |
 | `Rotary embedding does not match rope_theta` | transformers is older than 5.17. Upgrade it. |
 | CUDA out of memory | Lower `--max-microbatch-tokens` and rerun `--probe-only`. |
-| Dev CE never beats step 0 | Lower the learning rates, check the data for leakage or label errors, and compare against the Qwen control arm. |
-| Model CE ≈ `train_prior` CE | The state carries little information about the answer. Add informative profile fields or earlier answers. |
+| Dev CE never beats step 0 | Lower the learning rates, check for leakage or label errors, and compare against the Qwen control arm. |
+| Model CE ≈ `train_prior` CE | The context carries little information about the answer. Try `all_other` context (mind routing leakage) or a larger `max_state_chars`. |
 
 ## Privacy
 
-Fine-tuned models can memorize training text. Before conversion:
-- **Remove direct identifiers** (names, emails, phone numbers, free text containing them) from state fields.
+Fine-tuned models can memorize training text, and open answers flow into states as context.
+- **Keep identifying verbatims out:** list them in `context_exclude`, or exclude whole kinds with `context_exclude_kinds: ["text", "text_list"]`.
 - **Check your data permissions:** make sure respondent consent and your data agreements allow training models on the responses.

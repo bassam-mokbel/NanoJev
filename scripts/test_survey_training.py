@@ -2,10 +2,9 @@
 """Offline checks for survey conversion and full fine-tuning.
 
 Run: python3 -m unittest discover -s scripts -p test_survey_training.py -v
-Data checks need only the standard library. Training checks build a two-layer random Qwen3
+Conversion checks need qupa-datatypes, not torch. Training checks build a two-layer random Qwen3
 with a character tokenizer on CPU; they download nothing and skip without torch/transformers.
 """
-import csv
 import importlib.util
 import json
 import math
@@ -13,12 +12,17 @@ from pathlib import Path
 import tempfile
 import unittest
 
+from pydantic import ValidationError
+from qupa_datatypes import Survey, scale_content_fingerprint
+
 import prepare_survey_data as survey
 from predict_toy_decisions import prepare_examples
 import train_survey_decisions as trainer
 
 EXAMPLE = Path(__file__).resolve().parent.parent / "configs" / "survey_example"
 HAS_TORCH = all(importlib.util.find_spec(name) for name in ("torch", "transformers", "safetensors", "tokenizers"))
+SURVEY = Survey.model_validate_json((EXAMPLE / "survey.json").read_text(encoding="utf-8"))
+POSITION = {element.question_id: index for index, element in enumerate(SURVEY.elements)}
 
 
 class CharacterTokenizer:
@@ -28,13 +32,28 @@ class CharacterTokenizer:
         return [ord(char) + 1 for char in text]
 
 
-def example_spec():
-    return json.loads((EXAMPLE / "spec.json").read_text(encoding="utf-8"))
+def example_responses():
+    return [json.loads(line) for line in (EXAMPLE / "responses.jsonl").read_text(encoding="utf-8").splitlines()]
+
+
+def convert(directory, responses=None, **spec):
+    """Rows and report for the example survey, optionally with edited responses or spec fields."""
+    directory = Path(directory)
+    path = directory / "responses.jsonl"
+    path.write_text("".join(json.dumps(r) + "\n" for r in (responses or example_responses())), encoding="utf-8")
+    source = {"name": "coffee", "survey": str(EXAMPLE / "survey.json"), "responses": str(path)}
+    (directory / "spec.json").write_text(json.dumps({"sources": [source], "weight_key": "weight", **spec}))
+    return survey.build_rows(*survey.load_spec(directory / "spec.json"))
+
+
+def targets(rows, question_id):
+    return [(row, qid) for row in rows for qid, meta in row["meta"]["targets"].items()
+            if meta["question_id"] == question_id]
 
 
 def write_rows(directory, rows):
     path = Path(directory) / "rows.jsonl"
-    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    path.write_text(survey.rows_jsonl(rows), encoding="utf-8")
     return path
 
 
@@ -45,68 +64,152 @@ def choice_row(identifier="r1", split="train", **extra):
             "gold": {"brand": "zenith"}, **extra}
 
 
-class SurveyConversionTest(unittest.TestCase):
-    def test_respondent_rows_map_codes_and_skip_missing_answers(self):
-        rows = survey.convert(EXAMPLE / "responses.csv", example_spec())
-        first = next(r for r in rows if r["id"] == "R0001")
-        self.assertIn("- Age: 25-34", first["state"])
-        self.assertEqual(first["gold"]["brand_pref"], "everbrew")
-        self.assertEqual(first["gold"]["recommend"], 0)  # Code 6 falls in the first NPS bucket.
-        self.assertIsInstance(first["gold"]["aware_everbrew"], bool)
-        with open(EXAMPLE / "responses.csv", newline="") as handle:
-            refused = {r["respondent_id"] for r in csv.DictReader(handle) if r["Q5"] == "99"}
-        self.assertTrue(refused)
-        for row in rows:
-            self.assertEqual(set(row["questions"]), set(row["gold"]))
-            if row["id"] in refused:
-                self.assertNotIn("satisfaction", row["questions"])
+class QupaConversionTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        with tempfile.TemporaryDirectory() as directory:
+            cls.rows, cls.report = convert(directory)
 
-    def test_splits_are_deterministic_and_cover_requested_names(self):
-        first = survey.convert(EXAMPLE / "responses.csv", example_spec())
-        second = survey.convert(EXAMPLE / "responses.csv", example_spec())
-        self.assertEqual([r["split"] for r in first], [r["split"] for r in second])
-        self.assertEqual({r["split"] for r in first}, {"train", "dev", "calibration", "test"})
+    def test_each_answer_kind_maps_to_its_primitive(self):
+        def types(question_id):
+            return {row["questions"][qid]["type"] for row, qid in targets(self.rows, question_id)}
+        self.assertEqual(types("q_brand"), {"choice"})
+        self.assertEqual(types("q_satisfaction"), {"score", "boolean"})  # Scale plus the "don't know" hurdle.
+        self.assertEqual(types("q_cups"), {"score"})
+        self.assertEqual(types("q_attributes"), {"score"})
+        self.assertEqual(types("q_aware"), {"boolean"})
+        self.assertEqual(types("q_drivers"), {"choice"})
+        self.assertEqual(types("q_recommend"), {"choice"})  # 11 points exceed the 10-level Score limit.
+        for question_id in ("q_age", "q_why", "q_age_group", "intro"):
+            self.assertEqual(targets(self.rows, question_id), [])
 
-    def test_aggregate_rows_are_weighted_distributions(self):
-        rows = survey.convert(EXAMPLE / "responses.csv", example_spec(), aggregate=True)
-        groups = {}
-        for row in rows:
-            (qid, probs), = row["gold_probs"].items()
-            self.assertAlmostEqual(math.fsum(probs.values()), 1.0)
-            self.assertEqual(groups.setdefault(row["group"], row["split"]), row["split"])
-        self.assertTrue(all(len(r["questions"]) == 1 and "gold" not in r for r in rows))
+    def test_unselected_options_are_negative_targets(self):
+        responses = {r["respondent_id"]: r for r in example_responses()}
+        for row, qid in targets(self.rows, "q_aware"):
+            chosen = next(a["selected"] for a in responses[row["meta"]["respondent_id"]]["answers"]
+                          if a["question_id"] == "q_aware")
+            self.assertEqual(row["gold"][qid], row["meta"]["targets"][qid]["option"] in chosen)
+        self.assertEqual(len(targets(self.rows, "q_aware")), 5 * len(responses))
 
-    def test_answer_columns_cannot_leak_into_the_state(self):
-        spec = example_spec()
-        spec["state"]["fields"].append({"column": "Q3", "label": "Brand"})
-        with self.assertRaisesRegex(ValueError, "leak"):
-            survey.convert(EXAMPLE / "responses.csv", spec)
+    def test_ranking_steps_remove_ranked_items(self):
+        row = next(row for row, qid in targets(self.rows, "q_drivers") if qid.endswith("rank_3"))
+        steps = [row["questions"][f"q_drivers.rank_{rank}"] for rank in (1, 2, 3)]
+        self.assertEqual([len(step["criteria"]) for step in steps], [5, 4, 3])
+        for rank in (1, 2):
+            self.assertNotIn(row["gold"][f"q_drivers.rank_{rank}"], steps[2]["criteria"])
+        self.assertIn("Already ranked: 1.", steps[1]["instructions"])
 
-    def test_numeric_option_keys_are_rejected(self):
-        spec = example_spec()
-        spec["questions"][0]["options"]["1"]["key"] = "1"
-        with self.assertRaisesRegex(ValueError, "model input"):
-            survey.validate_spec(spec)
+    def test_loop_scope_is_part_of_the_question(self):
+        scoped = targets(self.rows, "q_recommend")
+        self.assertTrue(scoped)
+        for row, qid in scoped:
+            item = row["meta"]["targets"][qid]["loop_iterations"][0]["loop_item_id"]
+            self.assertIn({"brightbean": "BrightBean", "everbrew": "EverBrew"}[item], row["questions"][qid]["instructions"])
 
-    def test_score_level_limit(self):
-        spec = example_spec()
-        spec["questions"][3]["levels"] = [{"codes": [str(i)], "description": f"Rating {i} of 10"} for i in range(11)]
-        with self.assertRaisesRegex(ValueError, "2-10 levels"):
-            survey.validate_spec(spec)
+    def test_score_levels_read_on_their_own(self):
+        row, qid = targets(self.rows, "q_attributes")[0]
+        for level in row["questions"][qid]["criteria"]:
+            self.assertTrue(level.endswith("[1 = Very poor … 7 = Excellent]"), level)
 
+    def test_hidden_questions_never_reach_states(self):
+        self.assertTrue(all("Age group" not in row["state"] for row in self.rows))
+        self.assertTrue(all("q_age_group" not in row["meta"]["context_questions"] for row in self.rows))
 
-class TrainingDataTest(unittest.TestCase):
-    def test_paths_match_inference_encoding(self):
-        row = survey.convert(EXAMPLE / "responses.csv", example_spec())[0]
+    def test_preceding_context_excludes_the_target_and_later_questions(self):
+        for row in self.rows:
+            (meta, *_) = row["meta"]["targets"].values()
+            self.assertTrue(all(POSITION[q] < POSITION[meta["question_id"]] for q in row["meta"]["context_questions"]))
+
+    def test_splits_are_deterministic_and_grouped_by_respondent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            again, _ = convert(directory)
+        self.assertEqual(again, self.rows)
+        by_group = {}
+        for row in self.rows:
+            self.assertEqual(by_group.setdefault(row["group"], row["split"]), row["split"])
+        self.assertEqual(set(by_group.values()), {"train", "dev", "calibration", "test"})
+
+    def test_rows_load_with_inference_encoding(self):
+        row = self.rows[0]
         with tempfile.TemporaryDirectory() as directory:
             examples = trainer.load_examples(write_rows(directory, [row]), CharacterTokenizer(), 100000)
         request = {"states": [{"id": row["id"], "state": row["state"], "questions": row["questions"]}]}
-        reference = prepare_examples(request, CharacterTokenizer(), 100000)
         self.assertEqual([[list(p) for p in ex["leaf_tokens"]] for ex in examples],
-                         [ex["leaf_tokens"] for ex in reference])
-        for ex in examples:
-            self.assertEqual(sum(ex["target"]), 1.0)
+                         [ex["leaf_tokens"] for ex in prepare_examples(request, CharacterTokenizer(), 100000)])
+        self.assertTrue(all(ex["report_key"] == row["meta"]["targets"][ex["qid"]]["question_id"] for ex in examples))
 
+
+class QupaSpecOptionsTest(unittest.TestCase):
+    def test_synthetic_answers_are_excluded_unless_requested(self):
+        responses = example_responses()
+        for answer in responses[0]["answers"]:
+            answer["is_synthetic"] = True
+        rid = responses[0]["respondent_id"]
+        with tempfile.TemporaryDirectory() as directory:
+            rows, report = convert(directory, responses)
+            self.assertFalse([r for r in rows if r["meta"]["respondent_id"] == rid])
+            self.assertEqual(report["skipped"]["synthetic_answers"], len(responses[0]["answers"]))
+            rows, _ = convert(directory, responses, include_synthetic=True)
+            self.assertTrue([r for r in rows if r["meta"]["respondent_id"] == rid])
+
+    def test_invalid_responses_fail_or_are_skipped(self):
+        responses = example_responses()
+        next(a for a in responses[1]["answers"] if a["question_id"] == "q_brand")["selected"] = "not_an_option"
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, responses[1]["respondent_id"]):
+                convert(directory, responses)
+            rows, report = convert(directory, responses, skip_invalid_responses=True)
+        self.assertEqual([r["respondent"] for r in report["invalid_responses"]], [responses[1]["respondent_id"]])
+
+    def test_scale_verbalization_replaces_level_text(self):
+        scale = SURVEY.get("q_satisfaction").response_domain
+        labels = {f"p{v}": label for v, label in enumerate(["awful", "poor", "okay", "good", "great"], 1)}
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "verbal.json").write_text(json.dumps([{
+                "scale_fingerprint": scale_content_fingerprint(scale=scale), "language": "EN",
+                "generator_version": "test", "labels": labels}]))
+            rows, report = convert(directory, scale_verbalizations=str(Path(directory) / "verbal.json"),
+                                   verbalization_language="EN")
+        row, qid = next((r, q) for r, q in targets(rows, "q_satisfaction") if r["questions"][q]["type"] == "score")
+        self.assertEqual(row["questions"][qid]["criteria"], list(labels.values()))
+        self.assertGreater(report["scale_verbalizations_used"], 0)
+
+    def test_listed_context_gives_one_row_per_respondent(self):
+        listed = ["q_age", "q_region", "q_income"]
+        with tempfile.TemporaryDirectory() as directory:
+            rows, _ = convert(directory, context="listed", context_questions=listed)
+        self.assertEqual(len(rows), len(example_responses()))
+        for row in rows:
+            self.assertEqual(row["meta"]["context_questions"], listed)
+            self.assertFalse({m["question_id"] for m in row["meta"]["targets"].values()} & set(listed))
+
+    def test_context_exclusions_keep_verbatims_out(self):
+        with tempfile.TemporaryDirectory() as directory:
+            rows, _ = convert(directory, context_exclude_kinds=["text"], context_exclude=["q_age"])
+        self.assertTrue(rows)
+        for row in rows:
+            self.assertFalse({"q_why", "q_age"} & set(row["meta"]["context_questions"]))
+            self.assertNotIn("Why do you buy that brand?", row["state"])
+
+    def test_state_budget_shrinks_with_candidate_count(self):
+        with tempfile.TemporaryDirectory() as directory:
+            rows, report = convert(directory, max_question_chars=4000, context="all_other")
+        for row in rows:
+            widest = max(len(q.get("criteria") or [0, 0]) for q in row["questions"].values())
+            self.assertLessEqual(len(row["state"]), max(4000 // widest, 120))
+        self.assertGreater(report["skipped"]["context_answers_over_budget"], 0)
+
+    def test_spec_validation(self):
+        source = {"name": "s", "survey": "survey.json", "responses": "r.json"}
+        with self.assertRaises(ValidationError):
+            survey.TrainingSpec(sources=[source], context="listed")
+        with self.assertRaises(ValidationError):
+            survey.TrainingSpec(sources=[{**source, "responses_csv": "r.csv", "response_map": "m.json"}])
+        with self.assertRaises(ValidationError):
+            survey.TrainingSpec(sources=[source], splits={"train": 0.5, "test": 0.5})
+
+
+class TrainingDataTest(unittest.TestCase):
     def test_soft_targets_and_shorthands(self):
         q = {"type": "score", "instructions": "x", "criteria": ["low", "mid", "high"]}
         self.assertEqual(trainer.target_vector(q, ["0", "1", "2"], None, [0.2, 0.3, 0.5]), [0.2, 0.3, 0.5])
@@ -176,9 +279,9 @@ class TinyTrainingTest(unittest.TestCase):
         cls.directory = tempfile.TemporaryDirectory()
         root = Path(cls.directory.name)
         cls.bundle = build_tiny_bundle(root / "bundle")
-        rows = survey.convert(EXAMPLE / "responses.csv", example_spec())
-        cls.data = root / "rows.jsonl"
-        cls.data.write_text("".join(json.dumps(r) + "\n" for r in rows[:80]), encoding="utf-8")
+        rows, _ = convert(root, example_responses()[:40])
+        cls.spec = root / "spec.json"
+        cls.data = write_rows(root, rows)
         cls.root = root
 
     @classmethod
@@ -189,7 +292,7 @@ class TinyTrainingTest(unittest.TestCase):
         out = self.root / name
         trainer.main(["train", "--checkpoint-dir", str(self.bundle), "--data", str(self.data), "--output-dir", str(out),
                       "--device", "cpu", "--precision", "fp32", "--batch-questions", "6", "--eval-every", "4",
-                      "--log-every", "4", "--max-microbatch-tokens", "8192", *extra])
+                      "--log-every", "4", "--max-microbatch-tokens", "16384", *extra])
         return out
 
     def test_output_is_a_loadable_bundle_matching_the_report(self):
@@ -200,9 +303,18 @@ class TinyTrainingTest(unittest.TestCase):
         self.assertEqual(config["post_training"]["best_step"], report["best_step"])
         dev = [ex for ex in trainer.load_examples(self.data, tokenizer, 4096) if ex["split"] == "dev"]
         args = trainer.build_parser().parse_args(["train", "--checkpoint-dir", "x", "--data", "x", "--output-dir", "x",
-                                                  "--precision", "fp32", "--max-microbatch-tokens", "8192"])
+                                                  "--precision", "fp32", "--max-microbatch-tokens", "16384"])
         reloaded = trainer.evaluate(model, dev, args, torch.device("cpu"), tokenizer.pad_token_id)
         self.assertAlmostEqual(reloaded["ce"], report["final"]["dev"]["model"]["ce"], places=6)
+
+    def test_train_directly_from_a_qupa_spec(self):
+        out = self.root / "from_spec"
+        trainer.main(["train", "--checkpoint-dir", str(self.bundle), "--spec", str(self.spec), "--output-dir", str(out),
+                      "--device", "cpu", "--precision", "fp32", "--steps", "2", "--batch-questions", "6",
+                      "--eval-every", "2", "--log-every", "2", "--max-microbatch-tokens", "16384"])
+        self.assertEqual((out / "rows.jsonl").read_text(encoding="utf-8"), self.data.read_text(encoding="utf-8"))
+        report = json.loads((out / "report.json").read_text())
+        self.assertLessEqual(set(report["test_by_question"]), set(POSITION))
 
     def test_no_dev_improvement_ships_the_starting_weights(self):
         out = self.run_train("frozen", "--steps", "4", "--backbone-lr", "0", "--head-lr", "0")

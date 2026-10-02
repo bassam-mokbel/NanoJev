@@ -1,206 +1,565 @@
 #!/usr/bin/env python3
-"""Convert a respondent-level survey CSV into NanoJev decision rows.
+"""Convert qupa-datatypes surveys and responses into NanoJev decision rows.
 
-A JSON spec names the profile columns that form the text state and the survey questions that
-become targets. Every question maps onto one primitive:
+A training spec (JSON, validated by `TrainingSpec`) lists sources. Each pairs a qupa `Survey` with
+its `SurveyResponse` records, given as JSON/JSONL or as a raw CSV plus a qupa response CSV map.
+Every response is validated against its survey. Each answered closed question then becomes one or
+more NanoJev primitives, built from the full question definition so that unselected candidates are
+targets too:
 
-  single-select  -> choice   options keyed by meaningful names; the key itself is model input
-  Likert / NPS   -> score    2-10 self-contained level descriptions; several raw codes may share a level
-  yes/no, or one option of a multi-select -> boolean
+  single, grid row   ordered scale with 2-10 substantive points -> score, analytical low to high;
+                     any other domain -> choice over every value;
+                     non-substantive points ("don't know") -> a separate boolean, not a scale level
+  multi              one boolean per option; multi_grid: one per answered row and column
+  ranking            sequential choices: rank 1 among all items, rank 2 among the rest, ...
+  maxdiff            per task, best among the presented items, then worst among the remainder
+  text, numeric,     context only
+  text/numeric list
 
-Respondent mode writes one row per respondent with hard targets. Aggregate mode (--aggregate)
-merges respondents whose rendered state is identical and writes one row per segment and question
-with the weighted answer distribution as gold_probs, which trains share prediction directly.
-Splits are assigned by respondent (or segment) hash, so no group crosses splits.
+The state verbalizes the respondent's other answers through qupa's resolution layer. Context is
+"preceding" (earlier survey elements only, so routing that depends on the target cannot leak),
+"all_other", or an explicit "listed" set. Hidden variables and synthetic answers are excluded
+unless the spec opts in.
 """
 import argparse
-import csv
+from collections import Counter
 import hashlib
 import json
 import math
 from pathlib import Path
+import re
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from qupa_datatypes import (
+    ScaleVerbalization, Survey, SurveyResponse, VariableType, import_responses_csv,
+    iter_resolved_answer_components, scale_content_fingerprint, survey_fingerprint,
+)
 
 SPLITS = ("train", "dev", "calibration", "test", "ood")
+Split = Literal["train", "dev", "calibration", "test", "ood"]
+ROWS_SCHEMA = "nanojev-qupa-rows-v1"
+CLOSED_KINDS = {"single", "multi", "grid", "multi_grid", "ranking", "maxdiff"}
 
 
-def fail(message):
-    raise ValueError(message)
+class SourceSpec(BaseModel):
+    """One survey revision and its responses. Paths are relative to the spec file."""
+
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(pattern=r"^[A-Za-z0-9_.-]+$", description="Namespaces respondents and row ids.")
+    survey: str
+    responses: str | None = Field(default=None, description="SurveyResponse JSON list, object or JSONL.")
+    responses_csv: str | None = None
+    response_map: str | None = Field(default=None, description="qupa ResponseCsvMap for responses_csv.")
+    split: Split | None = Field(default=None, description="Assign the whole source to one split.")
+
+    @model_validator(mode="after")
+    def one_response_input(self):
+        if (self.responses is None) == (self.responses_csv is None):
+            raise ValueError(f"source {self.name!r}: give exactly one of responses or responses_csv")
+        if (self.responses_csv is None) != (self.response_map is None):
+            raise ValueError(f"source {self.name!r}: responses_csv requires response_map")
+        return self
 
 
-def split_for(group, fractions, seed):
-    position = int(hashlib.sha256(f"{seed}:{group}".encode()).hexdigest()[:15], 16) / 16 ** 15
-    cumulative = 0.0
-    for split, fraction in fractions.items():
-        cumulative += fraction
-        if position < cumulative:
-            return split
-    return list(fractions)[-1]
+class TrainingSpec(BaseModel):
+    """Which answers become targets, which become context, and how rows are split."""
+
+    model_config = ConfigDict(extra="forbid")
+    sources: list[SourceSpec] = Field(min_length=1)
+    targets: Literal["all"] | list[str] = "all"
+    exclude: list[str] = Field(default_factory=list, description="Question ids never used as targets.")
+    context: Literal["preceding", "all_other", "listed"] = "preceding"
+    context_questions: list[str] = Field(default_factory=list, description="Required for context 'listed'.")
+    context_exclude: list[str] = Field(default_factory=list, description="Question ids never shown in a state.")
+    context_exclude_kinds: list[str] = Field(default_factory=list, description=(
+        "Question kinds never shown in a state, e.g. ['text', 'text_list'] to keep open verbatims out."))
+    max_context_answers: int = Field(default=40, ge=0, description="Nearest answered questions kept per state.")
+    max_state_chars: int = Field(default=4000, ge=200, description="Context budget; nearest questions first.")
+    max_question_chars: int = Field(default=40000, ge=2000, description=(
+        "Every candidate repeats the state, so a row's state budget is also capped at this divided by its "
+        "largest candidate count. Keep it near 3x the trainer's --max-microbatch-tokens."))
+    max_line_chars: int = Field(default=300, ge=40, description="Each verbalized context line is cut here.")
+    include_hidden: bool = False
+    include_synthetic: bool = False
+    non_substantive: Literal["boolean", "skip"] = "boolean"
+    splits: dict[Split, float] = Field(default_factory=lambda: {"train": 0.7, "dev": 0.1, "calibration": 0.1,
+                                                                "test": 0.1})
+    split_seed: str = "nanojev-survey-v1"
+    group_key: str | None = Field(default=None, description="custom_meta key grouping respondents, e.g. a household.")
+    weight_key: str | None = Field(default=None, description="custom_meta key holding the survey weight.")
+    scale_verbalizations: str | None = Field(default=None, description="JSON/JSONL of qupa ScaleVerbalization.")
+    verbalization_language: Literal["DE", "EN"] | None = None
+    skip_invalid_responses: bool = False
+
+    @model_validator(mode="after")
+    def consistent(self):
+        if self.context == "listed" and not self.context_questions:
+            raise ValueError("context 'listed' requires context_questions")
+        if not {"train", "dev"} <= set(self.splits) or any(v < 0 for v in self.splits.values()) or \
+                abs(math.fsum(self.splits.values()) - 1) > 1e-9:
+            raise ValueError("splits must give nonnegative fractions summing to 1, including train and dev")
+        names = [source.name for source in self.sources]
+        if len(set(names)) != len(names):
+            raise ValueError("source names must be unique")
+        if (self.scale_verbalizations is None) != (self.verbalization_language is None):
+            raise ValueError("scale_verbalizations and verbalization_language go together")
+        return self
 
 
-def validate_spec(spec):
-    if not isinstance(spec, dict) or not {"id_column", "state", "questions"} <= set(spec):
-        fail("spec needs id_column, state and questions")
-    fractions = spec.get("splits", {"train": 0.7, "dev": 0.1, "calibration": 0.1, "test": 0.1})
-    if set(fractions) - set(SPLITS) or not {"train", "dev"} <= set(fractions) or \
-            any(not isinstance(v, (int, float)) or v < 0 for v in fractions.values()) or abs(sum(fractions.values()) - 1) > 1e-9:
-        fail(f"splits must assign nonnegative fractions summing to 1 over {SPLITS}, including train and dev")
-    state_columns = {field["column"] for field in spec["state"].get("fields", [])}
-    seen = set()
-    for q in spec["questions"]:
-        where = f"question {q.get('id')!r}"
-        if not isinstance(q.get("id"), str) or not q["id"] or q["id"] in seen:
-            fail(f"{where}: ids must be unique nonempty strings")
-        seen.add(q["id"])
-        if q.get("column") in state_columns:
-            fail(f"{where}: column {q['column']!r} is also a state field; the answer would leak into the input")
-        if q.get("type") not in {"boolean", "choice", "score"} or not str(q.get("instructions", "")).strip():
-            fail(f"{where}: needs type boolean/choice/score and nonempty instructions")
-        if q["type"] == "choice":
-            keys = [o["key"] for o in q["options"].values()]
-            if not 2 <= len(set(keys)) <= 255 or len(set(keys)) != len(keys):
-                fail(f"{where}: choice needs 2-255 distinct option keys")
-            if any(not k.strip() or k.strip().isdigit() for k in keys):
-                fail(f"{where}: option keys are model input ('key: description'); use names like 'acme', not codes")
-        elif q["type"] == "score":
-            codes = [c for level in q["levels"] for c in level["codes"]]
-            if not 2 <= len(q["levels"]) <= 10 or len(codes) != len(set(codes)):
-                fail(f"{where}: score needs 2-10 levels with disjoint codes (bucket NPS 0-10 into <=10 levels)")
-        elif set(q["true_codes"]) & set(q["false_codes"]):
-            fail(f"{where}: true_codes and false_codes overlap")
-    return fractions
+def sha256_file(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def render_state(row, spec, missing):
-    lines = [spec["state"]["intro"]] if spec["state"].get("intro") else []
-    for field in spec["state"].get("fields", []):
-        raw = row[field["column"]].strip()
-        if raw in missing:
-            continue
-        values = field.get("values")
-        if values is not None and raw not in values:
-            fail(f"state column {field['column']!r}: code {raw!r} has no label")
-        lines.append(f"- {field['label']}: {values[raw] if values is not None else raw}")
+def read_json_records(path):
+    """JSONL, a JSON list, or one JSON object. (A {"responses": [...]} wrapper would be ambiguous:
+    SurveyResponse itself accepts `responses` as an alias for `answers`.)"""
+    text = Path(path).read_text(encoding="utf-8")
+    if Path(path).suffix == ".jsonl":
+        return [json.loads(line) for line in text.splitlines() if line.strip()]
+    data = json.loads(text)
+    return data if isinstance(data, list) else [data]
+
+
+def load_source(source, base):
+    survey_path = base / source.survey
+    survey = Survey.model_validate_json(survey_path.read_text(encoding="utf-8"))
+    receipt = {"name": source.name, "survey": str(survey_path), "survey_sha256": sha256_file(survey_path),
+               "survey_fingerprint": survey_fingerprint(survey=survey), "split": source.split}
+    if source.responses is not None:
+        path = base / source.responses
+        responses = [SurveyResponse.model_validate(record) for record in read_json_records(path)]
+        receipt.update(responses=str(path), responses_sha256=sha256_file(path))
+    else:
+        csv_path, map_path = base / source.responses_csv, base / source.response_map
+        result = import_responses_csv(survey, csv_path.read_bytes(), json.loads(map_path.read_text(encoding="utf-8")),
+                                      source_file=str(csv_path))
+        responses = result.responses
+        receipt.update(responses_csv=str(csv_path), responses_csv_sha256=sha256_file(csv_path),
+                       response_map_sha256=sha256_file(map_path),
+                       csv_diagnostics=Counter(d.code for d in result.diagnostics))
+    receipt["responses_read"] = len(responses)
+    return survey, responses, receipt
+
+
+# ---------------------------------------------------------------------------
+# Text: every candidate and context answer must read correctly on its own.
+
+def clean(text):
+    return re.sub(r"\s+", " ", text or "").strip()
+
+
+def describe(item):
+    """Participant-facing text, falling back to the identifier for empty authored text."""
+    return clean(item.text) or item.label
+
+
+def bare_number(text):
+    return re.fullmatch(r"[+-]?\d+(?:[.,]\d+)?", clean(text)) is not None
+
+
+class ScaleText:
+    """Self-contained wording for scale points; NanoJev judges each Score level on its own.
+
+    A stored qupa ScaleVerbalization label wins. Otherwise, on an ordered scale whose points include
+    bare numbers ("2", "3", ...), every point carries the labelled endpoints: "4 [1 = Poor ... 7 = Good]".
+    """
+
+    def __init__(self, verbalizations=(), language=None):
+        self.labels = {v.scale_fingerprint: v.labels for v in verbalizations if v.language == language}
+        self.used = Counter()
+        self._cache = {}
+
+    def _scale_info(self, domain):
+        key = id(domain)
+        if key not in self._cache:
+            fingerprint = scale_content_fingerprint(scale=domain)
+            points = domain.analytical_points() if domain.direction is not None else []
+            numeric = any(bare_number(point.text) for point in points)
+            span = f" [{describe(points[0])} … {describe(points[-1])}]" if numeric and len(points) > 1 else ""
+            self._cache[key] = (self.labels.get(fingerprint, {}), span)
+        return self._cache[key]
+
+    def point(self, value, domain, with_span=True):
+        if domain.kind != "scale":
+            return describe(value)
+        labels, span = self._scale_info(domain)
+        if value.label in labels:
+            self.used["verbalization"] += 1
+            return clean(labels[value.label])
+        return describe(value) + (span if with_span and value.substantive else "")
+
+    def span(self, domain):
+        """The endpoint span once, for context headers whose answers omit it."""
+        return self._scale_info(domain)[1] if domain is not None and domain.kind == "scale" else ""
+
+
+def ordered_points(domain):
+    """Analytical score levels when the domain is an ordered scale NanoJev can express, else None."""
+    if domain.kind == "scale" and domain.direction is not None:
+        points = domain.analytical_points()
+        if 2 <= len(points) <= 10:
+            return points
+    return None
+
+
+def scope_suffix(answer):
+    return "".join(f"@{it.loop_id}.{it.loop_item_id}" for it in answer.loop_iterations)
+
+
+def loop_items(survey, answer):
+    scope = {it.loop_id: it.loop_item_id for it in answer.loop_iterations}
+    items = []
+    for loop in survey.loops_for(survey.get(answer.question_id)):
+        items += [item for item in loop.items if item.loop_item_id == scope.get(loop.loop_id)]
+    return items
+
+
+# ---------------------------------------------------------------------------
+# Targets: (nanojev question id, question, gold, meta) built from the full definition.
+
+class TargetBuilder:
+    def __init__(self, spec, scale_text, skipped):
+        self.spec, self.scale_text, self.skipped = spec, scale_text, skipped
+
+    def header(self, question, items, row=None):
+        lines = [f"Survey question: {clean(question.title)}"]
+        notes = []
+        for note in (question.hint, question.comment):
+            if clean(note) and clean(note) not in notes:
+                notes.append(clean(note))
+        lines += [f"Note: {note}" for note in notes]
+        lines += [f"Asked about: {describe(item)}" for item in items]
+        if row is not None:
+            lines.append(f"Item: {describe(row)}")
+        return lines
+
+    @staticmethod
+    def target(qid, typ, lines, criteria, gold, meta):
+        question = {"type": typ, "instructions": "\n".join(lines)}
+        if criteria is not None:
+            question["criteria"] = criteria
+        return qid, question, gold, meta
+
+    def domain(self, qid, question, domain, selected_id, lines, meta):
+        values = domain.values
+        selected = next(value for value in values if value.label == selected_id)
+        points = ordered_points(domain)
+        if points is not None:
+            others = [value for value in values if not value.substantive]
+            if others and self.spec.non_substantive == "boolean":
+                listed = "; ".join(describe(value) for value in others)
+                yield self.target(f"{qid}.non_substantive", "boolean", lines + [
+                    f"Does this respondent choose one of these answers instead of a scale point: {listed}?"],
+                    None, not selected.substantive, {**meta, "role": "non_substantive"})
+            if selected.substantive:
+                levels = [self.scale_text.point(point, domain) for point in points]
+                index = [point.label for point in points].index(selected.label)
+                yield self.target(qid, "score", lines + ["Which point of the scale does this respondent choose?"],
+                                  levels, index, {**meta, "role": "score"})
+            else:
+                self.skipped["non_substantive_answer_without_score"] += 1
+            return
+        if not 2 <= len(values) <= 255:
+            self.skipped[f"choice_with_{'one' if len(values) < 2 else 'over_255'}_values"] += 1
+            return
+        criteria = {value.label: self.scale_text.point(value, domain) for value in values}
+        yield self.target(qid, "choice", lines + ["Which answer does this respondent choose?"],
+                          criteria, selected.label, {**meta, "role": "choice"})
+
+    def build(self, survey, question, answer):
+        items = loop_items(survey, answer)
+        qid = question.question_id + scope_suffix(answer)
+        meta = {"question_id": question.question_id, "kind": question.kind,
+                "loop_iterations": [it.model_dump(mode="json") for it in answer.loop_iterations]}
+        kind = question.kind
+        if kind == "single":
+            yield from self.domain(qid, question, question.response_domain, answer.selected,
+                                   self.header(question, items), meta)
+        elif kind == "grid":
+            for row in question.rows:
+                if row.label in answer.selections:
+                    yield from self.domain(f"{qid}.{row.label}", question, question.response_domain,
+                                           answer.selections[row.label], self.header(question, items, row),
+                                           {**meta, "row": row.label})
+        elif kind == "multi":
+            chosen = set(answer.selected)
+            for value in question.response_domain.values:
+                yield self.target(f"{qid}.{value.label}", "boolean", self.header(question, items) + [
+                    f"Does this respondent select this answer: {self.scale_text.point(value, question.response_domain)}?"],
+                    None, value.label in chosen, {**meta, "role": "option", "option": value.label})
+        elif kind == "multi_grid":
+            for row in question.rows:
+                if row.label not in answer.selections:
+                    continue
+                chosen = set(answer.selections[row.label])
+                for value in question.response_domain.values:
+                    yield self.target(f"{qid}.{row.label}.{value.label}", "boolean",
+                                      self.header(question, items, row) + [
+                        f"Does this respondent select this answer: {self.scale_text.point(value, question.response_domain)}?"],
+                        None, value.label in chosen, {**meta, "role": "option", "row": row.label, "option": value.label})
+        elif kind == "ranking":
+            remaining, ranked = list(question.items), []
+            for rank, item_id in enumerate(answer.ranked, 1):
+                if len(remaining) < 2:
+                    break
+                lead = f"Which item does this respondent rank in position {rank}?"
+                if ranked:
+                    lead += " Already ranked: " + "; ".join(f"{i}. {describe(item)}" for i, item in enumerate(ranked, 1)) + "."
+                yield self.target(f"{qid}.rank_{rank}", "choice", self.header(question, items) + [lead],
+                                  {item.label: describe(item) for item in remaining}, item_id,
+                                  {**meta, "role": "rank_step", "rank": rank})
+                chosen = next(item for item in remaining if item.label == item_id)
+                remaining.remove(chosen)
+                ranked.append(chosen)
+        elif kind == "maxdiff":
+            best_pole, worst_pole = question.poles[0], question.poles[1]
+            for task, selection in enumerate(answer.selections, 1):
+                shown = [item for item in question.items if selection.presented is None or item.label in selection.presented]
+                best = next(item for item in shown if item.label == selection.best)
+                yield self.target(f"{qid}.task_{task}_best", "choice", self.header(question, items) + [
+                    f"Task {task}: which item does this respondent choose as {describe(best_pole)}?"],
+                    {item.label: describe(item) for item in shown}, selection.best,
+                    {**meta, "role": "maxdiff_best", "task": task})
+                rest = [item for item in shown if item.label != selection.best]
+                if len(rest) >= 2:
+                    yield self.target(f"{qid}.task_{task}_worst", "choice", self.header(question, items) + [
+                        f"Task {task}: after choosing {describe(best)} as {describe(best_pole)}, which remaining "
+                        f"item does this respondent choose as {describe(worst_pole)}?"],
+                        {item.label: describe(item) for item in rest}, selection.worst,
+                        {**meta, "role": "maxdiff_worst", "task": task})
+
+
+# ---------------------------------------------------------------------------
+# Context: the respondent's other answers, one verbalized entry per question and loop scope.
+
+def cut(line, limit):
+    return line if len(line) <= limit else line[:limit - 1] + "…"
+
+
+def context_entries(survey, components, scale_text, max_line_chars):
+    """Entries {question_id, position, hidden, lines, chars}, one per question and loop scope.
+
+    The question title appears once; grid and list rows follow as indented lines, and a scale's
+    endpoint span sits on the title line instead of on every answer.
+    """
+    positions = {element.question_id: index for index, element in enumerate(survey.elements)}
+    grouped = {}
+    for component in components:
+        question = component.question
+        domain = getattr(question, "response_domain", None)
+        key = (question.question_id, scope_suffix(component.source_answer))
+        if key not in grouped:
+            prefix = "".join(f"[{describe(it.item)}] " for it in component.context.loop_iterations if it.item)
+            grouped[key] = {"question_id": question.question_id, "kind": question.kind,
+                            "position": positions[question.question_id],
+                            "hidden": question.variable_type == VariableType.HIDDEN,
+                            "header": f"- {prefix}{clean(question.title)}", "span": "", "rows": {}}
+        entry = grouped[key]
+        row, column = getattr(component, "row", None), getattr(component, "column", None)
+        row_key = None if row is None else describe(row) + (f" / {describe(column)}" if column is not None else "")
+        kind = component.component_kind
+        if kind == "selection":
+            if domain is not None and component.selected.substantive:
+                entry["span"] = scale_text.span(domain)
+            piece = (scale_text.point(component.selected, domain, with_span=False) if domain is not None
+                     else describe(component.selected))
+        elif kind == "ranking":
+            piece = f"{component.rank}. {describe(component.option)}"
+        elif kind == "maxdiff_pole":
+            piece = f"task {component.task_index} {describe(component.pole)}: {describe(component.item)}"
+        else:
+            piece = f'"{clean(component.value)}"' if isinstance(component.value, str) else f"{component.value:g}"
+        if getattr(component, "other_text", None):
+            piece += f" ({clean(component.other_text)})"
+        entry["rows"].setdefault(row_key, []).append(piece)
+    entries = []
+    for entry in grouped.values():
+        header, rows = entry["header"] + entry["span"], entry["rows"]
+        lines = [cut(f"{header}: {'; '.join(rows.pop(None))}" if None in rows else header, max_line_chars)]
+        lines += [cut(f"    {row}: {'; '.join(pieces)}", max_line_chars) for row, pieces in rows.items()]
+        entries.append({key: entry[key] for key in ("question_id", "kind", "position", "hidden")} |
+                       {"lines": lines, "chars": sum(len(line) + 1 for line in lines)})
+    return entries
+
+
+def select_context(entries, spec, target_question, target_position, budget):
+    """Whole entries, nearest to the target first, within the answer-count and character budgets."""
+    if spec.context == "preceding":
+        pool = [e for e in entries if e["position"] < target_position]
+    elif spec.context == "all_other":
+        pool = [e for e in entries if e["question_id"] != target_question]
+    else:
+        listed = set(spec.context_questions)
+        pool = [e for e in entries if e["question_id"] in listed and e["question_id"] != target_question]
+    excluded, excluded_kinds = set(spec.context_exclude), set(spec.context_exclude_kinds)
+    pool = [e for e in pool if (spec.include_hidden or not e["hidden"]) and e["question_id"] not in excluded
+            and e["kind"] not in excluded_kinds]
+    if spec.context != "listed":  # Listed context keeps survey order; the others prefer proximity.
+        pool = sorted(pool, key=lambda e: abs(e["position"] - target_position))
+    chosen, used = [], 0
+    for entry in pool:
+        if len(chosen) == spec.max_context_answers:
+            break
+        if used + entry["chars"] <= budget:
+            chosen.append(entry)
+            used += entry["chars"]
+    dropped = len(pool) - len(chosen)
+    return sorted(chosen, key=lambda e: e["position"]), dropped  # sorted() is stable: loop scopes keep order.
+
+
+def state_header(survey):
+    lines = [f"Survey: {clean(survey.title)}"] if clean(survey.title) else []
+    if clean(survey.description):
+        lines.append(f"About the survey: {clean(survey.description)}")
+    return lines
+
+
+def render_state(survey, context):
+    lines = state_header(survey)
+    lines.append("Answers this respondent gave:" if context else "Answers this respondent gave: none recorded.")
+    lines += [line for entry in context for line in entry["lines"]]
     return "\n".join(lines)
 
 
-def question_payload(q):
-    payload = {"type": q["type"], "instructions": q["instructions"]}
-    if q["type"] == "choice":
-        payload["criteria"] = {o["key"]: o["description"] for o in q["options"].values()}
-    elif q["type"] == "score":
-        payload["criteria"] = [level["description"] for level in q["levels"]]
-    elif q.get("criteria"):
-        payload["criteria"] = q["criteria"]
-    return payload
+# ---------------------------------------------------------------------------
+
+def split_for(group, spec):
+    position = int(hashlib.sha256(f"{spec.split_seed}:{group}".encode()).hexdigest()[:15], 16) / 16 ** 15
+    cumulative = 0.0
+    for split, fraction in spec.splits.items():
+        cumulative += fraction
+        if position < cumulative:
+            return split
+    return list(spec.splits)[-1]
 
 
-def answer(q, raw):
-    """Map a raw CSV code to the target in candidate space."""
-    if q["type"] == "choice":
-        if raw not in q["options"]:
-            fail(f"question {q['id']!r}: code {raw!r} is not an option")
-        return q["options"][raw]["key"]
-    if q["type"] == "score":
-        for index, level in enumerate(q["levels"]):
-            if raw in level["codes"]:
-                return index
-        fail(f"question {q['id']!r}: code {raw!r} is not in any level")
-    if raw in q["true_codes"]:
-        return True
-    if raw in q["false_codes"]:
+def meta_value(response, key, what):
+    if key not in response.custom_meta:
+        raise ValueError(f"respondent {response.respondent_id!r}: custom_meta lacks {what} key {key!r}")
+    return response.custom_meta[key]
+
+
+def is_target(question, spec):
+    if question.kind not in CLOSED_KINDS or question.question_id in spec.exclude:
         return False
-    fail(f"question {q['id']!r}: code {raw!r} is neither true nor false")
+    if spec.targets != "all" and question.question_id not in spec.targets:
+        return False
+    if spec.context == "listed" and question.question_id in spec.context_questions:
+        return False  # Its answer is part of every state in this mode.
+    return question.variable_type == VariableType.VISIBLE or (
+        spec.include_hidden and question.variable_type == VariableType.HIDDEN)
 
 
-def candidate_key(q, value):
-    return {True: "true", False: "false"}.get(value, str(value)) if q["type"] != "choice" else value
-
-
-def convert(csv_path, spec, aggregate=False):
-    fractions = validate_spec(spec)
-    missing = set(spec.get("missing_codes", [""]))
-    seed = spec.get("split_seed", "survey-v1")
-    with open(csv_path, newline="", encoding="utf-8-sig") as handle:
-        reader = csv.DictReader(handle)
-        needed = {spec["id_column"], *(f["column"] for f in spec["state"].get("fields", [])),
-                  *(q["column"] for q in spec["questions"])}
-        if spec.get("weight_column"):
-            needed.add(spec["weight_column"])
-        if spec.get("group_column"):
-            needed.add(spec["group_column"])
-        absent = needed - set(reader.fieldnames or [])
-        if absent:
-            fail(f"CSV lacks columns {sorted(absent)}")
-        respondents, ids = [], set()
-        for line, row in enumerate(reader, 2):
-            rid = row[spec["id_column"]].strip()
-            if not rid or rid in ids:
-                fail(f"CSV line {line}: respondent id must be unique and nonempty")
-            ids.add(rid)
-            weight = float(row[spec["weight_column"]]) if spec.get("weight_column") else 1.0
+def build_rows(spec, base):
+    """All rows for a spec, plus a report of what was used, skipped and why."""
+    verbalizations = []
+    if spec.scale_verbalizations:
+        verbalizations = [ScaleVerbalization.model_validate(r) for r in read_json_records(base / spec.scale_verbalizations)]
+    scale_text = ScaleText(verbalizations, spec.verbalization_language)
+    skipped, roles, rows, receipts = Counter(), Counter(), [], []
+    invalid = []
+    for source in spec.sources:
+        survey, responses, receipt = load_source(source, base)
+        known = set(survey.element_ids)
+        missing = (set(spec.context_questions) | set(spec.targets if spec.targets != "all" else [])) - known
+        if missing and len(spec.sources) == 1:
+            raise ValueError(f"spec names questions absent from survey {source.name!r}: {sorted(missing)}")
+        builder = TargetBuilder(spec, scale_text, skipped)
+        positions = {element.question_id: index for index, element in enumerate(survey.elements)}
+        header_chars = len(render_state(survey, [{"lines": []}]))
+        used = 0
+        for index, response in enumerate(responses):
+            answers = [a for a in response.answers if spec.include_synthetic or not a.is_synthetic]
+            skipped["synthetic_answers"] += len(response.answers) - len(answers)
+            response = SurveyResponse(respondent_id=response.respondent_id, answers=answers,
+                                      custom_meta=response.custom_meta)
+            respondent = response.respondent_id or f"#{index}"
+            try:
+                components = list(iter_resolved_answer_components(survey, response, require_complete=False))
+            except ValueError as exc:
+                if not spec.skip_invalid_responses:
+                    raise ValueError(f"source {source.name!r}, respondent {respondent!r}: {exc}") from None
+                invalid.append({"source": source.name, "respondent": respondent, "error": str(exc)[:300]})
+                continue
+            used += 1
+            group = f"{source.name}:{meta_value(response, spec.group_key, 'group') if spec.group_key else respondent}"
+            split = source.split or split_for(group, spec)
+            weight = float(meta_value(response, spec.weight_key, "weight")) if spec.weight_key else 1.0
             if not math.isfinite(weight) or weight <= 0:
-                fail(f"CSV line {line}: weight must be positive")
-            answers = {q["id"]: answer(q, row[q["column"]].strip())
-                       for q in spec["questions"] if row[q["column"]].strip() not in missing}
-            respondents.append({"id": rid, "group": row[spec["group_column"]].strip() if spec.get("group_column") else rid,
-                                "weight": weight, "state": render_state(row, spec, missing), "answers": answers})
-    questions = {q["id"]: q for q in spec["questions"]}
-    rows = []
-    if not aggregate:
-        for r in respondents:
-            if r["answers"]:
-                rows.append({"id": r["id"], "group": r["group"], "split": split_for(r["group"], fractions, seed),
-                             "weight": r["weight"], "state": r["state"],
-                             "questions": {qid: question_payload(questions[qid]) for qid in r["answers"]},
-                             "gold": r["answers"]})
-        return rows
-    segments = {}
-    for r in respondents:
-        segment = segments.setdefault(r["state"], {})
-        for qid, value in r["answers"].items():
-            mass = segment.setdefault(qid, {})
-            key = candidate_key(questions[qid], value)
-            mass[key] = mass.get(key, 0.0) + r["weight"]
-    for state, by_question in sorted(segments.items()):
-        group = "segment:" + hashlib.sha256(state.encode()).hexdigest()[:16]
-        split = split_for(group, fractions, seed)
-        for qid in [q["id"] for q in spec["questions"] if q["id"] in by_question]:
-            mass = by_question[qid]
-            total = math.fsum(mass.values())
-            rows.append({"id": f"{group}:{qid}", "group": group, "split": split, "weight": total, "state": state,
-                         "questions": {qid: question_payload(questions[qid])},
-                         "gold_probs": {qid: {k: v / total for k, v in sorted(mass.items())}}})
-    return rows
+                raise ValueError(f"respondent {respondent!r}: weight must be positive, got {weight}")
+            entries = context_entries(survey, components, scale_text, spec.max_line_chars)
+            pending = []
+            for answer in response.answers:
+                question = survey.get(answer.question_id)
+                if not is_target(question, spec):
+                    skipped[f"not_a_target:{question.kind}:{question.variable_type.value}"] += 1
+                    continue
+                targets = list(builder.build(survey, question, answer))
+                if targets:
+                    pending.append((question, answer, targets))
+            # One row per target scope, except 'listed', whose single state serves every target.
+            batches = [pending] if spec.context == "listed" else [[item] for item in pending]
+            for batch in batches:
+                if not batch:
+                    continue
+                question, answer, _ = batch[0]
+                widest = max(len(q.get("criteria") or [0, 0]) for _, _, targets in batch for _, q, _, _ in targets)
+                budget = min(spec.max_state_chars, spec.max_question_chars // widest) - header_chars
+                context, dropped = select_context(entries, spec, question.question_id,
+                                                  positions[question.question_id], budget)
+                skipped["context_answers_over_budget"] += dropped
+                row_scope = "" if spec.context == "listed" else f":{question.question_id}{scope_suffix(answer)}"
+                row = {"id": f"{source.name}:{respondent}{row_scope}", "group": group, "split": split,
+                       "weight": weight, "state": render_state(survey, context), "questions": {}, "gold": {},
+                       "meta": {"schema": ROWS_SCHEMA, "source": source.name, "respondent_id": response.respondent_id,
+                                "context_questions": [e["question_id"] for e in context], "targets": {}}}
+                for _, _, targets in batch:
+                    for qid, nanojev_question, gold, target_meta in targets:
+                        row["questions"][qid] = nanojev_question
+                        row["gold"][qid] = gold
+                        row["meta"]["targets"][qid] = target_meta
+                        roles[f"{target_meta['kind']}:{target_meta['role']}"] += 1
+                rows.append(row)
+        receipt["responses_used"] = used
+        receipts.append(receipt)
+    report = {"schema": ROWS_SCHEMA, "spec": spec.model_dump(mode="json"), "sources": receipts, "rows": len(rows),
+              "questions": sum(len(r["questions"]) for r in rows),
+              "rows_by_split": dict(sorted(Counter(r["split"] for r in rows).items())),
+              "targets_by_role": dict(sorted(roles.items())), "skipped": dict(sorted(skipped.items())),
+              "scale_verbalizations_used": scale_text.used["verbalization"], "invalid_responses": invalid}
+    return rows, report
 
 
-def summary(rows):
-    result = {}
-    for row in rows:
-        split = result.setdefault(row["split"], {"rows": 0, "questions": 0, "weight": 0.0})
-        split["rows"] += 1
-        split["questions"] += len(row["questions"])
-        split["weight"] += row["weight"]
-    return result
+def load_spec(path):
+    path = Path(path)
+    return TrainingSpec.model_validate_json(path.read_text(encoding="utf-8")), path.resolve().parent
 
 
-def main():
+def rows_jsonl(rows):
+    return "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows)
+
+
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--csv", required=True, help="one row per respondent")
-    parser.add_argument("--spec", required=True, help="JSON question/state specification")
-    parser.add_argument("--output", required=True, help="JSONL for train_survey_decisions.py")
-    parser.add_argument("--aggregate", action="store_true", help="segment-level answer distributions as soft targets")
-    args = parser.parse_args()
-    spec = json.loads(Path(args.spec).read_text(encoding="utf-8"))
-    rows = convert(args.csv, spec, args.aggregate)
+    parser.add_argument("--spec", required=True, help="training spec JSON (see TrainingSpec)")
+    parser.add_argument("--output", required=True, help="rows JSONL for train_survey_decisions.py --data")
+    args = parser.parse_args(argv)
+    spec, base = load_spec(args.spec)
+    rows, report = build_rows(spec, base)
     if not any(r["split"] == "train" for r in rows) or not any(r["split"] == "dev" for r in rows):
-        fail("Conversion produced no train or no dev rows; add data or adjust split fractions")
+        raise SystemExit("Conversion produced no train or no dev rows; add responses or adjust splits")
     output = Path(args.output)
-    if output.exists():
-        fail(f"{output} exists; choose a new path")
+    report_path = output.with_name(output.stem + ".report.json")
+    for path in (output, report_path):
+        if path.exists():
+            raise SystemExit(f"{path} exists; choose a new output path")
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
-    print(json.dumps({"output": str(output), "mode": "aggregate" if args.aggregate else "respondent",
-                      "splits": summary(rows)}, indent=2))
+    output.write_text(rows_jsonl(rows), encoding="utf-8")
+    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    print(json.dumps({"output": str(output), "report": str(report_path), "rows": report["rows"],
+                      "questions": report["questions"], "rows_by_split": report["rows_by_split"],
+                      "targets_by_role": report["targets_by_role"]}, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

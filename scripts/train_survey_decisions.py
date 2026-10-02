@@ -7,6 +7,8 @@ checkpointing and dev-only checkpoint selection with the starting weights as a c
 per-row sampling weights, an optional ranked probability score for ordered Score questions, a
 train-marginal baseline, and one temperature fitted on the calibration split only.
 
+Training data is either a rows JSONL (--data) or a training spec (--spec) naming qupa-datatypes
+surveys and responses, which prepare_survey_data converts into <output-dir>/rows.jsonl first.
 Requests are encoded by predict_toy_decisions.prepare_examples, so training paths are the exact
 token inputs DecisionPredictor and serve_decisions.py use. The output directory is itself a
 NanoJev bundle (config.json, best.safetensors, tokenizer/, backbone_config/).
@@ -25,6 +27,7 @@ import os
 from pathlib import Path
 import random
 import shutil
+import tempfile
 import time
 
 from predict_toy_decisions import (
@@ -34,7 +37,7 @@ from predict_toy_decisions import (
 from train_pipeline_decisions import pack_complete_questions
 
 SPLITS = ("train", "dev", "calibration", "test", "ood")
-ROW_KEYS = {"id", "split", "state", "questions", "gold", "gold_probs", "weight", "group"}
+ROW_KEYS = {"id", "split", "state", "questions", "gold", "gold_probs", "weight", "group", "meta"}
 
 
 def dump(path, obj):
@@ -100,7 +103,7 @@ def load_examples(path, tokenizer, max_length):
         where = f"{path}:{number}"
         row = json.loads(line, object_pairs_hook=unique_object, parse_constant=reject_nonfinite)
         if not isinstance(row, dict) or not {"id", "split", "state", "questions"} <= set(row) or set(row) - ROW_KEYS:
-            raise ValueError(f"{where}: rows need id/split/state/questions; optional gold/gold_probs/weight/group")
+            raise ValueError(f"{where}: rows need id/split/state/questions; optional gold/gold_probs/weight/group/meta")
         if row["split"] not in SPLITS:
             raise ValueError(f"{where}: split must be one of {SPLITS}")
         if row["id"] in row_ids:
@@ -117,6 +120,9 @@ def load_examples(path, tokenizer, max_length):
         if not isinstance(gold, dict) or not isinstance(gold_probs, dict):
             raise ValueError(f"{where}: gold and gold_probs must be objects keyed by question id")
         questions = row["questions"] if isinstance(row["questions"], dict) else {}
+        meta = row.get("meta", {})
+        if not isinstance(meta, dict) or not isinstance(meta.get("targets", {}), dict):
+            raise ValueError(f"{where}: meta must be an object; meta.targets maps question ids to objects")
         unlabeled = [qid for qid in questions if qid not in gold and qid not in gold_probs]
         unknown = (set(gold) | set(gold_probs)) - set(questions)
         if unlabeled or unknown:
@@ -130,7 +136,9 @@ def load_examples(path, tokenizer, max_length):
                 raise ValueError(f"{where}:{ex['qid']}: {exc}") from None
             # Each path repeats the state; 4-byte arrays instead of Python int lists keep large surveys in RAM.
             ex["leaf_tokens"] = [array("i", path) for path in ex["leaf_tokens"]]
-            ex.update(split=row["split"], weight=float(weight), group=group, target=target,
+            # Reports group by the source survey question (qupa rows) rather than the derived target id.
+            report_key = (meta.get("targets", {}).get(ex["qid"]) or {}).get("question_id", ex["qid"])
+            ex.update(split=row["split"], weight=float(weight), group=group, target=target, report_key=report_key,
                       prior_key=json.dumps(question, ensure_ascii=False, sort_keys=True))
             examples.append(ex)
     if not examples:
@@ -202,7 +210,7 @@ def summarize(examples, probabilities, bins=15):
 def by_question(examples, probabilities):
     groups = {}
     for ex, p in zip(examples, probabilities):
-        pair = groups.setdefault(ex["qid"], ([], []))
+        pair = groups.setdefault(ex["report_key"], ([], []))
         pair[0].append(ex)
         pair[1].append(p)
     return {qid: summarize(*pair) for qid, pair in sorted(groups.items())}
@@ -357,6 +365,29 @@ def save_weights(model, path):
     os.replace(temporary, path)
 
 
+def materialize_rows(args, out):
+    """--data is used as given; --spec converts its qupa surveys and responses into rows first."""
+    if args.data:
+        return Path(args.data)
+    from prepare_survey_data import build_rows, load_spec, rows_jsonl
+    spec, base = load_spec(args.spec)
+    rows, report = build_rows(spec, base)
+    text = rows_jsonl(rows)
+    if args.probe_only:
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False, encoding="utf-8") as handle:
+            handle.write(text)
+        return Path(handle.name)
+    path = out / "rows.jsonl"
+    if args.resume:
+        if not path.is_file() or path.read_text(encoding="utf-8") != text:
+            raise ValueError("--resume: the spec's surveys and responses no longer convert to the saved rows.jsonl")
+        return path
+    path.write_text(text, encoding="utf-8")
+    dump(out / "conversion_report.json", report)
+    print(json.dumps({"converted": {key: report[key] for key in ("rows", "questions", "rows_by_split")}}), flush=True)
+    return path
+
+
 def train(args):
     import torch
     out = Path(args.output_dir)
@@ -365,6 +396,7 @@ def train(args):
         raise ValueError(f"--resume requires {state_path} (written by --save-resume-state)")
     if not args.resume and not args.probe_only:
         new_output_dir(out)
+    data_path = materialize_rows(args, out)  # Before the model loads, so data errors surface in seconds.
     device = torch.device(args.device)
     if args.precision == "bf16" and device.type == "cuda" and not torch.cuda.is_bf16_supported():
         raise ValueError("This CUDA device does not support BF16; use --precision fp32")
@@ -377,7 +409,7 @@ def train(args):
     started = time.perf_counter()
     model, tokenizer, run_config, root, paths = load_bundle_model(args.checkpoint_dir, device)
     max_length = args.max_length or run_config.get("max_length", 512)
-    examples = load_examples(args.data, tokenizer, max_length)
+    examples = load_examples(data_path, tokenizer, max_length)
     splits = {split: [ex for ex in examples if ex["split"] == split] for split in SPLITS}
     if not splits["train"] or not splits["dev"]:
         raise ValueError("Training needs nonempty train and dev splits")
@@ -395,7 +427,7 @@ def train(args):
     prior = fit_prior(splits["train"])
     pad = tokenizer.pad_token_id
     receipt = {"base_checkpoint_dir": str(root), "base_weights_sha256": sha256_file(paths["weights"]),
-               "data_sha256": sha256_file(args.data), "max_length": max_length, "precision": args.precision,
+               "data_sha256": sha256_file(data_path), "max_length": max_length, "precision": args.precision,
                "batch_questions": args.batch_questions, "seed": args.seed}
     counts = {s: {"questions": len(g), **{t: sum(ex["type"] == t for ex in g) for t in ("boolean", "choice", "score")}}
               for s, g in splits.items() if g}
@@ -434,6 +466,8 @@ def train(args):
                  "seconds": time.perf_counter() - probe_started, **memory_snapshot(device)}
         print(json.dumps({"memory_probe": probe}), flush=True)
         if args.probe_only:
+            if args.spec:
+                data_path.unlink()  # The probe's converted rows went to a temporary file.
             return
         dump(out / "memory_probe.json", probe)
         dump(out / "run_args.json", {**vars(args), "receipt": receipt})
@@ -556,7 +590,9 @@ def build_parser():
 
     t = commands.add_parser("train", help="full fine-tuning with dev-only selection")
     t.add_argument("--checkpoint-dir", required=True, help="bundle: config.json, best.safetensors, tokenizer/, backbone_config/")
-    t.add_argument("--data", required=True, help="JSONL rows: id, split, state, questions, gold and/or gold_probs")
+    source = t.add_mutually_exclusive_group(required=True)
+    source.add_argument("--data", help="JSONL rows: id, split, state, questions, gold and/or gold_probs")
+    source.add_argument("--spec", help="training spec naming qupa surveys and responses (see prepare_survey_data)")
     t.add_argument("--output-dir", required=True, help="new empty directory; becomes a NanoJev bundle")
     t.add_argument("--device", default="cuda")
     t.add_argument("--precision", choices=["bf16", "fp32"], default="bf16",

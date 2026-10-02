@@ -1,0 +1,11 @@
+{
+  "sources": [
+    {"name": "coffee_w1", "survey": "survey.json", "responses": "responses.jsonl"}
+  ],
+  "targets": "all",
+  "context": "preceding",
+  "max_context_answers": 40,
+  "weight_key": "weight",
+  "split_seed": "survey-example-v1",
+  "splits": {"train": 0.7, "dev": 0.1, "calibration": 0.1, "test": 0.1}
+}

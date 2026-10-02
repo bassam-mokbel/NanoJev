@@ -13,6 +13,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -23,10 +24,6 @@ if importlib.util.find_spec("nanojev") is None:  # Source checkout without `pip 
 import nanojev  # noqa: E402
 from nanojev import cli  # noqa: E402
 
-try:
-    import tomllib
-except ImportError:  # Python 3.10
-    tomllib = None
 
 
 def sibling_imports(path, names):
@@ -76,14 +73,14 @@ class CliTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "rows.jsonl"
             with contextlib.redirect_stdout(io.StringIO()):
-                code = cli.main(["survey", "prepare", "--csv", str(EXAMPLE / "responses.csv"),
-                                 "--spec", str(EXAMPLE / "spec.json"), "--output", str(output)])
+                code = cli.main(["survey", "prepare", "--spec", str(EXAMPLE / "training_spec.json"),
+                                 "--output", str(output)])
             self.assertEqual(code, 0)
-            self.assertEqual(len(output.read_text(encoding="utf-8").splitlines()), 240)
+            self.assertEqual(len(output.read_text(encoding="utf-8").splitlines()), 2268)
+            self.assertTrue((Path(directory) / "rows.report.json").is_file())
         self.assertEqual(sys.argv, saved)
 
 
-@unittest.skipIf(tomllib is None, "reading pyproject.toml needs Python 3.11+")
 class PyprojectTest(unittest.TestCase):
     def test_installed_modules_are_closed_under_sibling_imports(self):
         project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))

@@ -10,7 +10,7 @@ readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "OpenJev contributors" }]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 keywords = ["decision model", "calibration", "probabilistic classification", "qwen", "jev"]
 classifiers = [
   "Development Status :: 3 - Alpha",
@@ -26,6 +26,7 @@ dependencies = [
   "transformers>=5.17",
   "safetensors>=0.8",
   "huggingface_hub>=1.0",
+  "qupa-datatypes",
 ]
 
 [project.optional-dependencies]
@@ -66,7 +67,7 @@ pythonpath = ["scripts"]
 addopts = ["-ra"]
 
 [tool.ruff]
-target-version = "py310"
+target-version = "py311"
 line-length = 120
 src = ["scripts", "src"]
 
@@ -74,3 +75,6 @@ src = ["scripts", "src"]
 # Errors only (syntax, undefined names, invalid comparisons). Style rules would demand edits to
 # hash-recorded research scripts.
 select = ["E9", "F63", "F7", "F82"]
+
+[tool.uv.sources]
+qupa-datatypes = { editable = true, path = "../qupa-datatypes" }

@@ -1,0 +1,999 @@
+{
+  "title": "Home coffee study (synthetic example)",
+  "description": "Coffee bought for home consumption.",
+  "elements": [
+    {
+      "question_id": "intro",
+      "name": null,
+      "title": "Thank you for taking part in this short survey about coffee.",
+      "comment": null,
+      "hint": null,
+      "filter": null,
+      "mask": null,
+      "programming_notes": [],
+      "block_headings": {},
+      "variable_type": "visible",
+      "block_id": null,
+      "loop_id": null,
+      "parent_id": null,
+      "required": false,
+      "custom_meta": {},
+      "kind": "display"
+    },
+    {
+      "question_id": "q_age",
+      "name": null,
+      "title": "How old are you?",
+      "comment": null,
+      "hint": null,
+      "filter": null,
+      "mask": null,
+      "programming_notes": [],
+      "block_headings": {},
+      "variable_type": "visible",
+      "block_id": null,
+      "loop_id": null,
+      "parent_id": null,
+      "required": true,
+      "custom_meta": {},
+      "kind": "numeric",
+      "numeric_type": "integer",
+      "measurement_level": "unspecified",
+      "rows": [],
+      "min_value": 18.0,
+      "max_value": 90.0,
+      "size": null,
+      "decimal_places": null
+    },
+    {
+      "question_id": "q_age_group",
+      "name": null,
+      "title": "Age group (computed)",
+      "comment": null,
+      "hint": null,
+      "filter": null,
+      "mask": null,
+      "programming_notes": [],
+      "block_headings": {},
+      "variable_type": "hidden",
+      "block_id": null,
+      "loop_id": null,
+      "parent_id": null,
+      "required": true,
+      "custom_meta": {},
+      "kind": "single",
+      "response_domain": {
+        "kind": "choice_set",
+        "choice_set_id": null,
+        "choices": [
+          {
+            "option_id": "under_35",
+            "text": "Under 35",
+            "code": null,
+            "substantive": true,
+            "programming_note": null,
+            "exclusive": false,
+            "fixed": false,
+            "other_text": false,
+            "custom_meta": {}
+          },
+          {
+            "option_id": "age_35_plus",
+            "text": "35 or older",
+            "code": null,
+            "substantive": true,
+            "programming_note": null,
+            "exclusive": false,
+            "fixed": false,
+            "other_text": false,
+            "custom_meta": {}
+          }
+        ],
+        "presentation": {
+          "order": "authored"
+        },
+        "groups": [],
+        "custom_meta": {}
+      },
+      "display": "radio"
+    },
+    {
+      "question_id": "q_region",
+      "name": null,
+      "title": "Where do you live?",
+      "comment": null,
+      "hint": null,
+      "filter": null,
+      "mask": null,
+      "programming_notes": [],
+      "block_headings": {},
+      "variable_type": "visible",
+      "block_id": null,
+      "loop_id": null,
+      "parent_id": null,
+      "required": true,
+      "custom_meta": {},
+      "kind": "single",
+      "response_domain": {
+        "kind": "choice_set",
+        "choice_set_id": null,
+        "choices": [
+          {
+            "option_id": "north",
+            "text": "North",
+            "code": null,
+            "substantive": true,
+            "programming_note": null,
+            "exclusive": false,
+            "fixed": false,
+            "other_text": false,
+            "custom_meta": {}
+          },
+          {
+            "option_id": "city",
+            "text": "City center",
+            "code": null,
+            "substantive": true,
+            "programming_note": null,
+            "exclusive": false,
+            "fixed": false,
+            "other_text": false,
+            "custom_meta": {}
+          },
+          {
+            "option_id": "south",
+            "text": "South",
+            "code": null,
+            "substantive": true,
+            "programming_note": null,
+            "exclusive": false,
+            "fixed": false,
+            "other_text": false,
+            "custom_meta": {}
+          }
+        ],
+        "presentation": {
+          "order": "authored"
+        },
+        "groups": [],
+        "custom_meta": {}
+      },
+      "display": "radio"
+    },
+    {
+      "question_id": "q_income",
+      "name": null,
+      "title": "How would you describe your household income?",
+      "comment": null,
+      "hint": null,
+      "filter": null,
+      "mask": null,
+      "programming_notes": [],
+      "block_headings": {},
+      "variable_type": "visible",
+      "block_id": null,
+      "loop_id": null,
+      "parent_id": null,
+      "required": true,
+      "custom_meta": {},
+      "kind": "single",
+      "response_domain": {
+        "kind": "choice_set",
+        "choice_set_id": null,
+        "choices": [
+          {
+            "option_id": "below",
+            "text": "Below median",
+            "code": null,
+            "substantive": true,
+            "programming_note": null,
+            "exclusive": false,
+            "fixed": false,
+            "other_text": false,
+            "custom_meta": {}
+          },
+          {
+            "option_id": "around",
+            "text": "Around median",
+            "code": null,
+            "substantive": true,
+            "programming_note": null,
+            "exclusive": false,
+            "fixed": false,
+            "other_text": false,
+            "custom_meta": {}
+          },
+          {
+            "option_id": "above",
+            "text": "Above median",
+            "code": null,
+            "substantive": true,
+            "programming_note": null,
+            "exclusive": false,
+            "fixed": false,
+            "other_text": false,
+            "custom_meta": {}
+          }
+        ],
+        "presentation": {
+          "order": "authored"
+        },
+        "groups": [],
+        "custom_meta": {}
+      },
+      "display": "radio"
+    },
+    {
+      "question_id": "q_cups",
+      "name": null,
+      "title": "How many cups of coffee do you drink per day?",
+      "comment": null,
+      "hint": null,
+      "filter": null,
+      "mask": null,
+      "programming_notes": [],
+      "block_headings": {},
+      "variable_type": "visible",
+      "block_id": null,
+      "loop_id": null,
+      "parent_id": null,
+      "required": true,
+      "custom_meta": {},
+      "kind": "single",
+      "response_domain": {
+        "kind": "scale",
+        "scale_id": null,
+        "points": [
+          {
+            "point_id": "less_than_one",
+            "text": "Less than one",
+            "code": null,
+            "scale_value": 0.5,
+            "substantive": true,
+            "programming_note": null,
+            "fixed": false,
+            "exclusive": false,
+            "other_text": false,
+            "custom_meta": {}
+          },
+          {
+            "point_id": "one",
+            "text": "One",
+            "code": null,
+            "scale_value": 1.0,
+            "substantive": true,
+            "programming_note": null,
+            "fixed": false,
+            "exclusive": false,
+            "other_text": false,
+            "custom_meta": {}
+          },
+          {
+            "point_id": "two",
+            "text": "Two",
+            "code": null,
+            "scale_value": 2.0,
+            "substantive": true,
+            "programming_note": null,
+            "fixed": false,
+            "exclusive": false,
+            "other_text": false,
+            "custom_meta": {}
+          },
+          {
+            "point_id": "three_plus",
+            "text": "Three or more",
+            "code": null,
+            "scale_value": 3.0,
+            "substantive": true,
+            "programming_note": null,
+            "fixed": false,
+            "exclusive": false,
+            "other_text": false,
+            "custom_meta": {}
+          }
+        ],
+        "measurement_level": "ordinal",
+        "direction": "low_to_high",
+        "presentation": {
+          "order": "authored"
+        },
+        "groups": [],
+        "custom_meta": {}
+      },
+      "display": "radio"
+    },
+    {
+      "question_id": "q_aware",
+      "name": null,
+      "title": "Which of these coffee brands have you heard of?",
+      "comment": null,
+      "hint": "Select all that apply.",
+      "filter": null,
+      "mask": null,
+      "programming_notes": [],
+      "block_headings": {},
+      "variable_type": "visible",
+      "block_id": null,
+      "loop_id": null,
+      "parent_id": null,
+      "required": true,
+      "custom_meta": {},
+      "kind": "multi",
+      "response_domain": {
+        "kind": "choice_set",
+        "choice_set_id": null,
+        "choices": [
+          {
+            "option_id": "brightbean",
+            "text": "BrightBean",
+            "code": null,
+            "substantive": true,
+            "programming_note": null,
+            "exclusive": false,
+            "fixed": false,
+            "other_text": false,
+            "custom_meta": {}
+          },
+          {
+            "option_id": "everbrew",
+            "text": "EverBrew",
+            "code": null,
+            "substantive": true,
+            "programming_note": null,
+            "exclusive": false,
+            "fixed": false,
+            "other_text": false,
+            "custom_meta": {}
+          },
+          {
+            "option_id": "corner_roast",
+            "text": "Corner Roast",
+            "code": null,
+            "substantive": true,
+            "programming_note": null,
+            "exclusive": false,
+            "fixed": false,
+            "other_text": false,
+            "custom_meta": {}
+          },
+          {
+            "option_id": "store_brand",
+            "text": "The supermarket's own store brand",
+            "code": null,
+            "substantive": true,
+            "programming_note": null,
+            "exclusive": false,
+            "fixed": false,
+            "other_text": false,
+            "custom_meta": {}
+          },
+          {
+            "option_id": "none_of_these",
+            "text": "None of these",
+            "code": null,
+            "substantive": true,
+            "programming_note": null,
+            "exclusive": true,
+            "fixed": false,
+            "other_text": false,
+            "custom_meta": {}
+          }
+        ],
+        "presentation": {
+          "order": "authored"
+        },
+        "groups": [],
+        "custom_meta": {}
+      },
+      "min_selected": null,
+      "max_selected": null
+    },
+    {
+      "question_id": "q_brand",
+      "name": null,
+      "title": "Which coffee brand do you buy most often for home use?",
+      "comment": null,
+      "hint": null,
+      "filter": null,
+      "mask": null,
+      "programming_notes": [],
+      "block_headings": {},
+      "variable_type": "visible",
+      "block_id": null,
+      "loop_id": null,
+      "parent_id": null,
+      "required": true,
+      "custom_meta": {},
+      "kind": "single",
+      "response_domain": {
+        "kind": "choice_set",
+        "choice_set_id": null,
+        "choices": [
+          {
+            "option_id": "brightbean",
+            "text": "BrightBean, a premium single-origin brand",
+            "code": null,
+            "substantive": true,
+            "programming_note": null,
+            "exclusive": false,
+            "fixed": false,
+            "other_text": false,
+            "custom_meta": {}
+          },
+          {
+            "option_id": "everbrew",
+            "text": "EverBrew, a mainstream national brand",
+            "code": null,
+            "substantive": true,
+            "programming_note": null,
+            "exclusive": false,
+            "fixed": false,
+            "other_text": false,
+            "custom_meta": {}
+          },
+          {
+            "option_id": "corner_roast",
+            "text": "Corner Roast, a local specialty roaster",
+            "code": null,
+            "substantive": true,
+            "programming_note": null,
+            "exclusive": false,
+            "fixed": false,
+            "other_text": false,
+            "custom_meta": {}
+          },
+          {
+            "option_id": "store_brand",
+            "text": "The supermarket's own store brand",
+            "code": null,
+            "substantive": true,
+            "programming_note": null,
+            "exclusive": false,
+            "fixed": false,
+            "other_text": false,
+            "custom_meta": {}
+          }
+        ],
+        "presentation": {
+          "order": "authored"
+        },
+        "groups": [],
+        "custom_meta": {}
+      },
+      "display": "radio"
+    },
+    {
+      "question_id": "q_satisfaction",
+      "name": null,
+      "title": "How satisfied are you with the brand you buy most often?",
+      "comment": null,
+      "hint": null,
+      "filter": null,
+      "mask": null,
+      "programming_notes": [],
+      "block_headings": {},
+      "variable_type": "visible",
+      "block_id": null,
+      "loop_id": null,
+      "parent_id": null,
+      "required": false,
+      "custom_meta": {},
+      "kind": "single",
+      "response_domain": {
+        "kind": "scale",
+        "scale_id": null,
+        "points": [
+          {
+            "point_id": "p1",
+            "text": "1 = Very dissatisfied",
+            "code": 1,
+            "scale_value": 1.0,
+            "substantive": true,
+            "programming_note": null,
+            "fixed": false,
+            "exclusive": false,
+            "other_text": false,
+            "custom_meta": {}
+          },
+          {
+            "point_id": "p2",
+            "text": "2",
+            "code": 2,
+            "scale_value": 2.0,
+            "substantive": true,
+            "programming_note": null,
+            "fixed": false,
+            "exclusive": false,
+            "other_text": false,
+            "custom_meta": {}
+          },
+          {
+            "point_id": "p3",
+            "text": "3",
+            "code": 3,
+            "scale_value": 3.0,
+            "substantive": true,
+            "programming_note": null,
+            "fixed": false,
+            "exclusive": false,
+            "other_text": false,
+            "custom_meta": {}
+          },
+          {
+            "point_id": "p4",
+            "text": "4",
+            "code": 4,
+            "scale_value": 4.0,
+            "substantive": true,
+            "programming_note": null,
+            "fixed": false,
+            "exclusive": false,
+            "other_text": false,
+            "custom_meta": {}
+          },
+          {
+            "point_id": "p5",
+            "text": "5 = Very satisfied",
+            "code": 5,
+            "scale_value": 5.0,
+            "substantive": true,
+            "programming_note": null,
+            "fixed": false,
+            "exclusive": false,
+            "other_text": false,
+            "custom_meta": {}
+          },
+          {
+            "point_id": "dont_know",
+            "text": "Don't know",
+            "code": 99,
+            "scale_value": null,
+            "substantive": false,
+            "programming_note": null,
+            "fixed": false,
+            "exclusive": false,
+            "other_text": false,
+            "custom_meta": {}
+          }
+        ],
+        "measurement_level": "ordinal",
+        "direction": "low_to_high",
+        "presentation": {
+          "order": "authored"
+        },
+        "groups": [],
+        "custom_meta": {}
+      },
+      "display": "radio"
+    },
+    {
+      "question_id": "q_attributes",
+      "name": null,
+      "title": "How do you rate your usual brand on the following?",
+      "comment": null,
+      "hint": null,
+      "filter": null,
+      "mask": null,
+      "programming_notes": [],
+      "block_headings": {},
+      "variable_type": "visible",
+      "block_id": null,
+      "loop_id": null,
+      "parent_id": null,
+      "required": true,
+      "custom_meta": {},
+      "kind": "grid",
+      "rows": [
+        {
+          "item_id": "taste",
+          "text": "Taste",
+          "code": null,
+          "programming_note": null,
+          "fixed": false,
+          "other_text": false,
+          "custom_meta": {}
+        },
+        {
+          "item_id": "price",
+          "text": "Price",
+          "code": null,
+          "programming_note": null,
+          "fixed": false,
+          "other_text": false,
+          "custom_meta": {}
+        },
+        {
+          "item_id": "availability",
+          "text": "Availability in shops",
+          "code": null,
+          "programming_note": null,
+          "fixed": false,
+          "other_text": false,
+          "custom_meta": {}
+        }
+      ],
+      "response_domain": {
+        "kind": "scale",
+        "scale_id": null,
+        "points": [
+          {
+            "point_id": "p1",
+            "text": "1 = Very poor",
+            "code": 1,
+            "scale_value": 1.0,
+            "substantive": true,
+            "programming_note": null,
+            "fixed": false,
+            "exclusive": false,
+            "other_text": false,
+            "custom_meta": {}
+          },
+          {
+            "point_id": "p2",
+            "text": "2",
+            "code": 2,
+            "scale_value": 2.0,
+            "substantive": true,
+            "programming_note": null,
+            "fixed": false,
+            "exclusive": false,
+            "other_text": false,
+            "custom_meta": {}
+          },
+          {
+            "point_id": "p3",
+            "text": "3",
+            "code": 3,
+            "scale_value": 3.0,
+            "substantive": true,
+            "programming_note": null,
+            "fixed": false,
+            "exclusive": false,
+            "other_text": false,
+            "custom_meta": {}
+          },
+          {
+            "point_id": "p4",
+            "text": "4",
+            "code": 4,
+            "scale_value": 4.0,
+            "substantive": true,
+            "programming_note": null,
+            "fixed": false,
+            "exclusive": false,
+            "other_text": false,
+            "custom_meta": {}
+          },
+          {
+            "point_id": "p5",
+            "text": "5",
+            "code": 5,
+            "scale_value": 5.0,
+            "substantive": true,
+            "programming_note": null,
+            "fixed": false,
+            "exclusive": false,
+            "other_text": false,
+            "custom_meta": {}
+          },
+          {
+            "point_id": "p6",
+            "text": "6",
+            "code": 6,
+            "scale_value": 6.0,
+            "substantive": true,
+            "programming_note": null,
+            "fixed": false,
+            "exclusive": false,
+            "other_text": false,
+            "custom_meta": {}
+          },
+          {
+            "point_id": "p7",
+            "text": "7 = Excellent",
+            "code": 7,
+            "scale_value": 7.0,
+            "substantive": true,
+            "programming_note": null,
+            "fixed": false,
+            "exclusive": false,
+            "other_text": false,
+            "custom_meta": {}
+          }
+        ],
+        "measurement_level": "ordinal",
+        "direction": "low_to_high",
+        "presentation": {
+          "order": "authored"
+        },
+        "groups": [],
+        "custom_meta": {}
+      },
+      "item_presentation": {
+        "order": "authored"
+      }
+    },
+    {
+      "question_id": "q_drivers",
+      "name": null,
+      "title": "What matters most when you choose coffee?",
+      "comment": null,
+      "hint": "Rank up to three.",
+      "filter": null,
+      "mask": null,
+      "programming_notes": [],
+      "block_headings": {},
+      "variable_type": "visible",
+      "block_id": null,
+      "loop_id": null,
+      "parent_id": null,
+      "required": true,
+      "custom_meta": {},
+      "kind": "ranking",
+      "items": [
+        {
+          "item_id": "taste",
+          "text": "Taste",
+          "code": null,
+          "programming_note": null,
+          "fixed": false,
+          "other_text": false,
+          "custom_meta": {}
+        },
+        {
+          "item_id": "price",
+          "text": "Price",
+          "code": null,
+          "programming_note": null,
+          "fixed": false,
+          "other_text": false,
+          "custom_meta": {}
+        },
+        {
+          "item_id": "organic",
+          "text": "Organic or fair trade",
+          "code": null,
+          "programming_note": null,
+          "fixed": false,
+          "other_text": false,
+          "custom_meta": {}
+        },
+        {
+          "item_id": "convenience",
+          "text": "Easy to buy",
+          "code": null,
+          "programming_note": null,
+          "fixed": false,
+          "other_text": false,
+          "custom_meta": {}
+        },
+        {
+          "item_id": "brand",
+          "text": "A brand I trust",
+          "code": null,
+          "programming_note": null,
+          "fixed": false,
+          "other_text": false,
+          "custom_meta": {}
+        }
+      ],
+      "item_presentation": {
+        "order": "authored"
+      },
+      "min_ranked": 1,
+      "max_ranked": 3,
+      "unique": true
+    },
+    {
+      "question_id": "q_why",
+      "name": null,
+      "title": "Why do you buy that brand?",
+      "comment": null,
+      "hint": null,
+      "filter": null,
+      "mask": null,
+      "programming_notes": [],
+      "block_headings": {},
+      "variable_type": "visible",
+      "block_id": null,
+      "loop_id": null,
+      "parent_id": null,
+      "required": false,
+      "custom_meta": {},
+      "kind": "text",
+      "rows": [],
+      "multiline": false,
+      "min_length": null,
+      "max_length": null
+    },
+    {
+      "question_id": "q_recommend",
+      "name": null,
+      "title": "How likely are you to recommend this brand to a friend?",
+      "comment": null,
+      "hint": null,
+      "filter": null,
+      "mask": null,
+      "programming_notes": [],
+      "block_headings": {},
+      "variable_type": "visible",
+      "block_id": null,
+      "loop_id": "brands",
+      "parent_id": null,
+      "required": true,
+      "custom_meta": {},
+      "kind": "single",
+      "response_domain": {
+        "kind": "scale",
+        "scale_id": null,
+        "points": [
+          {
+            "point_id": "p0",
+            "text": "0 = Not at all likely",
+            "code": 0,
+            "scale_value": 0.0,
+            "substantive": true,
+            "programming_note": null,
+            "fixed": false,
+            "exclusive": false,
+            "other_text": false,
+            "custom_meta": {}
+          },
+          {
+            "point_id": "p1",
+            "text": "1",
+            "code": 1,
+            "scale_value": 1.0,
+            "substantive": true,
+            "programming_note": null,
+            "fixed": false,
+            "exclusive": false,
+            "other_text": false,
+            "custom_meta": {}
+          },
+          {
+            "point_id": "p2",
+            "text": "2",
+            "code": 2,
+            "scale_value": 2.0,
+            "substantive": true,
+            "programming_note": null,
+            "fixed": false,
+            "exclusive": false,
+            "other_text": false,
+            "custom_meta": {}
+          },
+          {
+            "point_id": "p3",
+            "text": "3",
+            "code": 3,
+            "scale_value": 3.0,
+            "substantive": true,
+            "programming_note": null,
+            "fixed": false,
+            "exclusive": false,
+            "other_text": false,
+            "custom_meta": {}
+          },
+          {
+            "point_id": "p4",
+            "text": "4",
+            "code": 4,
+            "scale_value": 4.0,
+            "substantive": true,
+            "programming_note": null,
+            "fixed": false,
+            "exclusive": false,
+            "other_text": false,
+            "custom_meta": {}
+          },
+          {
+            "point_id": "p5",
+            "text": "5",
+            "code": 5,
+            "scale_value": 5.0,
+            "substantive": true,
+            "programming_note": null,
+            "fixed": false,
+            "exclusive": false,
+            "other_text": false,
+            "custom_meta": {}
+          },
+          {
+            "point_id": "p6",
+            "text": "6",
+            "code": 6,
+            "scale_value": 6.0,
+            "substantive": true,
+            "programming_note": null,
+            "fixed": false,
+            "exclusive": false,
+            "other_text": false,
+            "custom_meta": {}
+          },
+          {
+            "point_id": "p7",
+            "text": "7",
+            "code": 7,
+            "scale_value": 7.0,
+            "substantive": true,
+            "programming_note": null,
+            "fixed": false,
+            "exclusive": false,
+            "other_text": false,
+            "custom_meta": {}
+          },
+          {
+            "point_id": "p8",
+            "text": "8",
+            "code": 8,
+            "scale_value": 8.0,
+            "substantive": true,
+            "programming_note": null,
+            "fixed": false,
+            "exclusive": false,
+            "other_text": false,
+            "custom_meta": {}
+          },
+          {
+            "point_id": "p9",
+            "text": "9",
+            "code": 9,
+            "scale_value": 9.0,
+            "substantive": true,
+            "programming_note": null,
+            "fixed": false,
+            "exclusive": false,
+            "other_text": false,
+            "custom_meta": {}
+          },
+          {
+            "point_id": "p10",
+            "text": "10 = Extremely likely",
+            "code": 10,
+            "scale_value": 10.0,
+            "substantive": true,
+            "programming_note": null,
+            "fixed": false,
+            "exclusive": false,
+            "other_text": false,
+            "custom_meta": {}
+          }
+        ],
+        "measurement_level": "ordinal",
+        "direction": "low_to_high",
+        "presentation": {
+          "order": "authored"
+        },
+        "groups": [],
+        "custom_meta": {}
+      },
+      "display": "radio"
+    }
+  ],
+  "source": null,
+  "blocks": [],
+  "loops": [
+    {
+      "loop_id": "brands",
+      "title": "Brand evaluation",
+      "items": [
+        {
+          "loop_item_id": "brightbean",
+          "code": null,
+          "text": "BrightBean",
+          "custom_meta": {}
+        },
+        {
+          "loop_item_id": "everbrew",
+          "code": null,
+          "text": "EverBrew",
+          "custom_meta": {}
+        }
+      ],
+      "custom_meta": {}
+    }
+  ],
+  "custom_meta": {}
+}

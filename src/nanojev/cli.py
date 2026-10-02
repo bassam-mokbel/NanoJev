@@ -11,8 +11,8 @@ import types
 COMMANDS = {
     ("predict",): ("predict_toy_decisions", [], "batch prediction from a local checkpoint (JSON in, JSON out)"),
     ("serve",): ("serve_decisions", [], "HTTP inference at POST /api/evaluate (run from the repo or pass --web-root)"),
-    ("survey", "prepare"): ("prepare_survey_data", [], "convert a respondent CSV and question spec into rows"),
-    ("survey", "train"): ("train_survey_decisions", ["train"], "fully fine-tune a bundle on decision rows"),
+    ("survey", "prepare"): ("prepare_survey_data", [], "convert qupa surveys and responses (training spec) into rows"),
+    ("survey", "train"): ("train_survey_decisions", ["train"], "fully fine-tune a bundle on rows or a training spec"),
     ("survey", "init-bundle"): ("train_survey_decisions", ["init-bundle"], "untuned backbone with fresh heads"),
 }
 
